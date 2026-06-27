@@ -1,0 +1,98 @@
+<meta charset="utf-8">
+<title>exen-player frame</title>
+<style>
+  html,body { margin:0; height:100%; background:#000; overflow:hidden; }
+  body { display:grid; place-items:center; }
+  /* Always present at 240x320; exen's native 132x176 (same 3:4 aspect) upscales cleanly. */
+  #screen { image-rendering:pixelated; display:block; background:#000; width:240px; height:320px; }
+  #msg { position:fixed; inset:0; display:grid; place-items:center; gap:10px;
+         color:#8b93a3; font:14px/1.4 system-ui,sans-serif; text-align:center; }
+  #msg.hidden { display:none; }
+  .spinner { width:28px; height:28px; border:3px solid #262b36; border-top-color:#c08cff;
+             border-radius:50%; animation:spin .8s linear infinite; margin:0 auto; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+</style>
+<canvas id="screen" width="132" height="176"></canvas>
+<div id="msg"><div><div class="spinner"></div><div id="mtext">Loading…</div></div></div>
+
+<script src="../../wasm/exen.js"></script>
+<script src="/packages/console/frame-savestate.js"></script>
+<script>
+// exen-player embeddable frame — implements the v1 player iframe protocol.
+const qs = new URLSearchParams(location.search);
+const GAME = qs.get('game');
+const AUTOSTART = qs.get('autostart') !== '0';
+
+const post = (type, extra={}) => parent.postMessage({ ns:'player', type, ...extra }, '*');
+const setMsg = (t) => { document.getElementById('mtext').textContent = t; post('status',{text:t}); };
+const hideMsg = () => document.getElementById('msg').classList.add('hidden');
+const showMsg = () => document.getElementById('msg').classList.remove('hidden');
+
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+let img = null, W=132, H=176;
+
+// ExEn key codes (core/exen.zig): arrows are ASCII digits on the keypad cross.
+const KEY = { ArrowUp:0x32, ArrowDown:0x38, ArrowLeft:0x34, ArrowRight:0x36,
+              Enter:-8 /*FIRE*/, ' ':-8, z:0x2a /*SOFT1 '*'*/, x:0x23 /*SOFT2 '#'*/,
+              Z:0x2a, X:0x23 };
+for (let d=0; d<=9; d++) KEY[String(d)] = 0x30+d;
+KEY['*']=0x2a; KEY['#']=0x23;
+
+let M=null, raf=0, paused=false;
+
+function setupCanvas() {
+  W = M.ccall('exn_screen_w','number',[],[]) || 132;
+  H = M.ccall('exn_screen_h','number',[],[]) || 176;
+  canvas.width = W; canvas.height = H;
+  img = ctx.createImageData(W, H);
+}
+function present() {
+  const sp = M.ccall('exn_screen_ptr','number',[],[]);
+  if (!sp) return;
+  // ABGR8888 LE == canvas RGBA byte order — blit straight in (re-derive view).
+  img.data.set(new Uint8Array(M.HEAPU8.buffer, sp, W*H*4));
+  ctx.putImageData(img, 0, 0);
+}
+function loop(){
+  if (paused) return;
+  M.ccall('exn_tick','null',['number'],[33]);
+  present();
+  if (M.ccall('exn_quit_requested','number',[],[])) { post('quit'); return; }
+  raf = requestAnimationFrame(loop);
+}
+
+async function boot(){
+  try {
+    if (!GAME) throw new Error('no ?game= specified');
+    // exen.js + exen.wasm + exen.data live in ../../wasm/ relative to this frame.
+    setMsg('Initializing…');
+    if (!M) M = await EXEN({ locateFile: (p) => new URL('../../wasm/'+p, location.href).href });
+    setMsg('Downloading…');
+    const r = await fetch(GAME); if (!r.ok) throw new Error('HTTP '+r.status);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    setMsg('Loading…');
+    M.FS.writeFile('/game.exn', bytes);          // hand the .exn to the VM via MEMFS
+    const rc = M.ccall('exn_boot','number',[],[]);
+    if (rc !== 0) throw new Error('boot rc='+rc);
+    setupCanvas();
+    hideMsg(); post('ready', {w:W, h:H});
+    raf = requestAnimationFrame(loop);
+  } catch(e){ setMsg('Failed: '+e.message); showMsg(); post('error',{message:e.message}); }
+}
+
+addEventListener('keydown', e => { const k=KEY[e.key]; if(k===undefined||!M)return;
+  e.preventDefault(); M.ccall('exn_key','null',['number','number'],[1,k]); });
+addEventListener('keyup', e => { const k=KEY[e.key]; if(k===undefined||!M)return;
+  e.preventDefault(); M.ccall('exn_key','null',['number','number'],[0,k]); });
+
+addEventListener('message', e => { const m=e.data; if(!m||m.ns!=='player')return;
+  if (m.type==='pause') paused=true;
+  else if (m.type==='resume'){ if(paused){ paused=false; raf=requestAnimationFrame(loop);} }
+  else if (m.type==='key' && M) M.ccall('exn_key','null',['number','number'],[m.event?1:0, m.code]);
+  else if (m.type==='start' && !raf) boot();
+});
+
+if (window.installSaveStates) installSaveStates({ prefix:'exn', getModule:()=>M, getGameKey:()=>GAME||'exn', post });
+
+if (AUTOSTART) boot();

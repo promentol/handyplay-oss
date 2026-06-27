@@ -1,0 +1,9 @@
+.zig-cache/
+zig-out/
+*.bmp.tmp
+last_frame.bmp
+boot_screenshot.bmp
+assets/
+samples/
+.claude
+wasm

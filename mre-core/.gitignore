@@ -1,0 +1,6 @@
+fs/
+game_sources/
+games/
+MREmu
+zig-out/
+wasm

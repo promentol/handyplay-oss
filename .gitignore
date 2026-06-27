@@ -1,0 +1,35 @@
+# Zig
+.zig-cache/
+zig-out/
+
+# Vendored Unicorn (CPU emulator) — built out-of-band, shared by the mre/mrp cores
+vendor/unicorn/
+
+# Build outputs — WASM / libretro cores are produced by the build scripts,
+# never committed (see build-cores.sh and each core's frontends/*/build.sh).
+dist/
+*/wasm/*.o
+*/wasm/*.a
+*/wasm/*.wasm
+*/wasm/*.js
+*/wasm/*.data
+*/wasm/*.html
+*.so
+*.dylib
+
+# RetroArch is shallow-cloned on demand by build-cores.sh
+/retroarch/
+
+# Scratch / captures
+*.bmp.tmp
+last_frame.bmp
+boot_screenshot.bmp
+
+# Claude Code
+.claude/
+CLAUDE.md
+.mcp.json
+.claudeignore
+
+# macOS
+.DS_Store

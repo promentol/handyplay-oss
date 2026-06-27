@@ -1,0 +1,13 @@
+.zig-cache/
+zig-out/
+assets/
+samples/
+wasm/
+build/
+dist/
+build-core/
+build-core-debug/
+build-core-release/
+build-core-release-small/
+build-core-release-small-debug/
+build-core-release-small-debug-debug/

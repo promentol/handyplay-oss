@@ -1,0 +1,137 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ExEn .exn catalog — WASM demo</title>
+<style>
+  body { font: 14px/1.4 system-ui; max-width: 720px; margin: 2em auto; padding: 0 1em; }
+  .row { display: flex; align-items: center; gap: 1em; padding: .6em 0; border-bottom: 1px solid #eee; }
+  .row canvas, .row img { width: 96px; max-height: 96px; image-rendering: pixelated; object-fit: contain; background: #f4f4f4; }
+  .meta { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #555; }
+  .err  { color: #c33; }
+  .name { font-weight: 600; }
+</style>
+
+<h1>ExEn catalog</h1>
+<p>Drop one or more <code>.exn</code> files onto this page (or use the file picker).
+   The page calls four WASM exports: <code>exn_validate</code>, <code>exn_name_into</code>,
+   <code>exn_icon_info</code>, <code>wasm_alloc</code>/<code>wasm_free</code>.</p>
+<input type="file" id="picker" multiple accept=".exn">
+<div id="list"></div>
+
+<script type="module">
+// ── load + bind the wasm module ────────────────────────────────────────────
+const moduleBytes = await fetch("../../zig-out/bin/exen-catalog.wasm").then(r => r.arrayBuffer());
+const { instance } = await WebAssembly.instantiate(moduleBytes, {});
+const exports = instance.exports;
+const memory  = exports.memory;
+
+const E = { BAD_MAGIC: -1, BAD_NAME: -2, BUF_TOO_SMALL: -3, NO_ICON: -4, OOM: -5 };
+function errText(code) {
+  return { [E.BAD_MAGIC]: "not a .exn (bad magic)",
+           [E.BAD_NAME]: "malformed name region",
+           [E.BUF_TOO_SMALL]: "output buffer too small",
+           [E.NO_ICON]: "no icon in this file",
+           [E.OOM]: "out of memory" }[code] ?? `error ${code}`;
+}
+
+// ── helper: copy a JS Uint8Array into wasm memory and return its ptr ───────
+function uploadBytes(buf) {
+  const ptr = exports.wasm_alloc(buf.length);
+  if (!ptr) throw new Error("wasm_alloc failed");
+  new Uint8Array(memory.buffer, ptr, buf.length).set(buf);
+  return ptr;
+}
+
+function readMetadata(exnBytes) {
+  const ptr = uploadBytes(exnBytes);
+  try {
+    const v = exports.exn_validate(ptr, exnBytes.length);
+    if (v !== 0) return { error: errText(v) };
+
+    // Name
+    const nameCap = 64;
+    const nameOut = exports.wasm_alloc(nameCap);
+    if (!nameOut) return { error: "wasm_alloc name buffer failed" };
+    let name;
+    try {
+      const wrote = exports.exn_name_into(ptr, exnBytes.length, nameOut, nameCap);
+      if (wrote < 0) return { error: errText(wrote) };
+      const nameBytes = new Uint8Array(memory.buffer, nameOut, wrote);
+      name = new TextDecoder().decode(nameBytes);
+    } finally { exports.wasm_free(nameOut, nameCap); }
+
+    // Icon — decode the ExEn PNG variant to a raw RGBA buffer (the
+    // embedded PNG uses non-standard IHDR.compression so browsers can't
+    // render it directly).
+    const infoOut = exports.wasm_alloc(12);
+    if (!infoOut) return { error: "wasm_alloc icon buffer failed" };
+    let icon = null;
+    let pixelsPtr = 0;
+    let pixelsSize = 0;
+    try {
+      const ri = exports.exn_icon_decode_rgba(ptr, exnBytes.length, infoOut);
+      if (ri === 0) {
+        const info = new Uint32Array(memory.buffer, infoOut, 3);
+        const [w, h, pp] = [info[0], info[1], info[2]];
+        pixelsPtr = pp;
+        pixelsSize = w * h * 4;
+        // Copy out so the buffer survives wasm_free.
+        const px = new Uint8ClampedArray(memory.buffer, pp, pixelsSize).slice();
+        icon = { width: w, height: h, rgba: px };
+      } else if (ri !== E.NO_ICON) {
+        return { error: errText(ri) };
+      }
+    } finally {
+      exports.wasm_free(infoOut, 12);
+      if (pixelsPtr !== 0) exports.wasm_free(pixelsPtr, pixelsSize);
+    }
+
+    return { name, icon, size: exnBytes.length };
+  } finally {
+    exports.wasm_free(ptr, exnBytes.length);
+  }
+}
+
+// ── UI ────────────────────────────────────────────────────────────────────
+const list = document.getElementById("list");
+
+async function handleFile(file) {
+  const exnBytes = new Uint8Array(await file.arrayBuffer());
+  const meta = readMetadata(exnBytes);
+  const row = document.createElement("div");
+  row.className = "row";
+  if (meta.error) {
+    row.innerHTML = `<div><strong>${file.name}</strong><div class="err">${meta.error}</div></div>`;
+  } else {
+    if (meta.icon) {
+      const canvas = document.createElement("canvas");
+      canvas.width = meta.icon.width;
+      canvas.height = meta.icon.height;
+      const ctx = canvas.getContext("2d");
+      const imageData = new ImageData(meta.icon.rgba, meta.icon.width, meta.icon.height);
+      ctx.putImageData(imageData, 0, 0);
+      row.appendChild(canvas);
+    } else {
+      const ph = document.createElement("div");
+      ph.style.cssText = "width:64px;height:64px;background:#f4f4f4";
+      row.appendChild(ph);
+    }
+    const info = document.createElement("div");
+    info.innerHTML = `
+      <div class="name">${meta.name}</div>
+      <div class="meta">${file.name} · ${meta.size.toLocaleString()} bytes
+        ${meta.icon ? `· icon ${meta.icon.width}×${meta.icon.height}` : "· no icon"}
+      </div>`;
+    row.appendChild(info);
+  }
+  list.appendChild(row);
+}
+
+document.getElementById("picker").addEventListener("change", e => {
+  for (const f of e.target.files) handleFile(f);
+});
+document.addEventListener("dragover", e => e.preventDefault());
+document.addEventListener("drop", e => {
+  e.preventDefault();
+  for (const f of e.dataTransfer.files) handleFile(f);
+});
+</script>
