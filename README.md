@@ -2,6 +2,11 @@
   <img src="assets/banner.png" alt="Handyplay — feature-phone game emulators" width="720">
 </p>
 
+<p align="center">
+  <a href="https://handyplay-demo.promentol.workers.dev"><b>▶ Play the live demo</b></a>
+  &nbsp;·&nbsp; runs in your browser (best in Google Chrome)
+</p>
+
 # Handyplay — OSS emulator cores
 
 Open-source emulators for the games that shipped on early-2000s feature phones —
