@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="Handyplay — feature-phone game emulators" width="720">
+</p>
+
 # Handyplay — OSS emulator cores
 
 Open-source emulators for the games that shipped on early-2000s feature phones —
@@ -5,6 +9,18 @@ the J2ME-adjacent platforms that never had a preservation story. Each core is
 reimplemented from scratch in **Zig**, is frontend-agnostic (a portable `core/`
 plus thin frontends), and is built to be embedded anywhere: native desktop, the
 browser, or RetroArch.
+
+## Screenshots
+
+Real frames captured from the cores running unmodified games:
+
+<table>
+<tr>
+  <td align="center"><img src="assets/screenshot-exen.png" height="220" alt="Crash Bandicoot running on exen-core"><br><sub><b>exen-core</b> · Crash Bandicoot</sub></td>
+  <td align="center"><img src="assets/screenshot-mre.png" height="220" alt="Assassin's Creed running on mre-core"><br><sub><b>mre-core</b> · Assassin's Creed</sub></td>
+  <td align="center"><img src="assets/screenshot-mrp.png" height="220" alt="A Mythroad gamelet running on mrp-core"><br><sub><b>mrp-core</b> · Mythroad</sub></td>
+</tr>
+</table>
 
 ## Why Handyplay
 
@@ -52,23 +68,13 @@ Web, and Telegram** that wraps them in a polished library, controls, and sync.
 | Game slots (games you can install) | — | Limited | Unlimited |
 | Setup | Bring your own host, BIOS & games | Zero-config | Zero-config |
 
+### List of emulators
+
 | Core | Platform | Format | CPU / VM |
 |------|----------|--------|----------|
 | [`mre-core`](mre-core)   | MediaTek MRE / MAUI                 | `.vxp` | ARM (vendored Unicorn) |
 | [`mrp-core`](mrp-core)   | MediaTek MRP / sky-mobi Mythroad    | `.mrp` | ARM (vendored Unicorn) |
 | [`exen-core`](exen-core) | ExEn 2                              | `.exn` | Java-bytecode VM (pure interpreter) |
-
-## Screenshots
-
-Real frames captured from the cores running unmodified games:
-
-<table>
-<tr>
-  <td align="center"><img src="assets/screenshot-exen.png" height="220" alt="Crash Bandicoot running on exen-core"><br><sub><b>exen-core</b> · Crash Bandicoot</sub></td>
-  <td align="center"><img src="assets/screenshot-mre.png" height="220" alt="Assassin's Creed running on mre-core"><br><sub><b>mre-core</b> · Assassin's Creed</sub></td>
-  <td align="center"><img src="assets/screenshot-mrp.png" height="220" alt="A Mythroad gamelet running on mrp-core"><br><sub><b>mrp-core</b> · Mythroad</sub></td>
-</tr>
-</table>
 
 ## Design
 
