@@ -195,6 +195,9 @@ SDL frontend see each core's docs.
 | Under consideration | **Flash Lite** | Adobe Flash Lite mobile content. |
 | Under consideration | **Palm OS** | Palm OS games and apps. |
 | Under consideration | **KaiOS / webOS** | KaiOS, webOS, and other HTML5/canvas-based mobile game runtimes. |
+| Under consideration | **Brick Game handhelds** | The "9999-in-1" Tetris-style LCD handhelds (Holtek HT1130-class single-chip MCUs) and similar segment/dot-matrix LCD games. |
+| Under consideration | **Virtual pets** | Tamagotchi and other LCD virtual-pet toys on Epson E0C6S46-class 4-bit MCUs. |
+| Under consideration | **VT NES-on-a-chip** | V.R. Technology famiclone SoCs — VT01, VT02, VT03, VT03_HR, VT08, VT09_TV, VT09_LCD, VT168, VT268 — behind plug-and-play TV games and "*-in-1" multicarts. |
 | Under consideration | **Other platforms** | WIPI, Windows Mobile / Pocket PC, and other early-mobile gaming runtimes. |
 
 ## License
