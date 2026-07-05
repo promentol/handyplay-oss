@@ -315,6 +315,16 @@ pub fn main() !void {
         return err;
     };
 
+    // Register the audio/haptic backends BEFORE boot: the gamelet's init
+    // (run inside boot/loadExn) can already call playMelody/playVibrator, so
+    // the backend function pointers must be installed first or those early
+    // melodies hit a null backend and are silently dropped. register() only
+    // installs pointers — the SDL audio device is opened lazily on first play.
+    // (The matching deinit() defers live after SDL init below, so they run
+    // BEFORE SDL_Quit in the LIFO defer order.)
+    audio.register();
+    haptic.register();
+
     // Boot the VM: parse simulator.ini, init state, fire opcode 0x600 (VM_INIT)
     // through the real dispatcher, then optionally load argv[1] (.exn).
     try exen.boot(allocator, g_ini_path);
@@ -439,16 +449,10 @@ pub fn main() !void {
     }
     defer c.SDL_Quit();
 
-    // Register the SDL3 audio backend so playMelody/stopMelody
-    // actually produce sound. Audio subsystem is initialised lazily
-    // on the first play() so headless / video-only runs don't open
-    // a device they won't use.
-    audio.register();
+    // Backends were registered before boot (above); tear their SDL resources
+    // down here so these defers run BEFORE `SDL_Quit` (LIFO) — destroying the
+    // audio stream after SDL_Quit would segfault.
     defer audio.deinit();
-
-    // Register haptic backend so Gamelet.playVibrator (idx 81)
-    // forwards to SDL3 gamepad rumble (no-op when no gamepad attached).
-    haptic.register();
     defer haptic.deinit();
 
     var title_buf: [80]u8 = undefined;

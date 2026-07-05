@@ -23,7 +23,12 @@ pub const class_name: []const u8 = "Displayable";
 pub const first_index: u32 = 65;
 pub const last_index: u32 = 66;
 
-const FIELD_PEN_COLOR: u32 = 0x3dd3c2e7;
+// Graphics current pen colour — slot 1, int (hash 0xd042cece). Must match
+// `Graphics.FIELD_PEN_COLOR` exactly: `setColor` (idx 14) writes this field,
+// so reading any other hash here yields 0 and the label silently renders in
+// the white fallback. (This was previously the stale synthetic 0x3dd3c2e7,
+// which never matched what setColor wrote — the cause of blank command labels.)
+const FIELD_PEN_COLOR: u32 = 0xd042cece;
 
 // ── [65] Displayable.haveDisplayableCommand() → bool — sub_424A60 ──────────
 // Canonical body (reference/ref:24764):
@@ -57,14 +62,17 @@ fn haveDisplayableCommand(_: *Vm, args: bridge.ArgFrame) i16 {
 //     return 0
 //
 // sub_4238F0 (text helper) maps `mode` via sub_403F56(mode):
-//     input 0 → CENTER (case 2 → x via slot 32)
+//     input 0 → RIGHT  (case 2 → x via font-slot +32)
 //     input 1 → LEFT   (case 1 → x = 1)
 //     input 2+ → DON'T_DRAW (case 0 → return 0)
 // Y is positioned at bottom of clip: `clip_h - font_descender_height`.
+// The right/left roles are confirmed by the framework's own use: it passes
+// mode 1 for the left soft key and mode 0 for the right soft key, matching
+// the canonical simulator's "Take" (left) / "Play" (right) command bar.
 //
 // We mirror the alignment-based positioning. The save/restore is a no-op
 // in our model (drawString doesn't enforce clip rects yet — tracked in
-// task #140). For LEFT/CENTER we render via `core.text.drawString` into
+// task #140). For LEFT/RIGHT we render via `core.text.drawString` into
 // the Graphics target. For DON'T_DRAW we return without rendering.
 fn unnamed_sub_424A9D(vm: *Vm, args: bridge.ArgFrame) i16 {
     // args.this() is the Displayable receiver (unused)
@@ -76,18 +84,26 @@ fn unnamed_sub_424A9D(vm: *Vm, args: bridge.ArgFrame) i16 {
     const text = chars_inst.bytes orelse return 0;
     if (text.len == 0) return 0;
 
-    // Canonical sub_403F56 remap of `mode`:
-    //   0 → 2 (CENTER), 1 → 1 (LEFT), 2 → 0 (DON'T_DRAW),
-    //   n → 0 (DON'T_DRAW) for n >= 2.
+    // Canonical `mode` remap via sub_403F56 + sub_4238F0 switch:
+    //   mode 0 → case 2 → x via font-slot +32  → RIGHT-aligned
+    //   mode 1 → case 1 → x = 1                → LEFT-aligned
+    //   mode ≥2 → case 0                        → DON'T_DRAW
+    // (case 2's font helper is right-align, not centre: verified against the
+    // canonical simulator screenshot — the framework passes mode 1 for the
+    // left soft key "Take" and mode 0 for the right soft key "Play".)
     const draw_mode: u32 = if (mode == 0) 2 else if (mode == 1) 1 else 0;
     if (draw_mode == 0) return 0;
 
-    // Pen colour: same FIELD_PEN_COLOR slot as drawChars (idx 5).
+    // Pen colour: read the graphics' current colour (set by Graphics.setColor,
+    // idx 14) and convert RGB→ABGR with the R/B swap, exactly as drawChars
+    // (idx 5) does. Fall back to opaque white when unset.
     const color_rgb = _h.instField(vm, graphics, FIELD_PEN_COLOR);
-    const color: u32 = if ((color_rgb & 0x01000000) != 0)
-        0xFF000000 | (color_rgb & 0x00FFFFFF)
-    else
-        0xFFFFFFFF;
+    const color: u32 = if ((color_rgb & 0x01000000) != 0) blk: {
+        const r: u32 = (color_rgb >> 16) & 0xFF;
+        const g: u32 = (color_rgb >> 8) & 0xFF;
+        const b: u32 = color_rgb & 0xFF;
+        break :blk 0xFF000000 | (b << 16) | (g << 8) | r;
+    } else 0xFFFFFFFF;
 
     // Measure text width (glyph + 1px inter-glyph spacing per char,
     // matching core.text.drawString's advance — see core/text.zig:92).
@@ -105,7 +121,7 @@ fn unnamed_sub_424A9D(vm: *Vm, args: bridge.ArgFrame) i16 {
 
     const x: i32 = switch (draw_mode) {
         1 => 1, // LEFT
-        2 => @divTrunc(tw - text_w, 2), // CENTER
+        2 => tw - text_w, // RIGHT (flush to the right edge)
         else => 0,
     };
 

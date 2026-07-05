@@ -556,8 +556,15 @@ pub const KEY_RIGHT: i32 = '6';
 // Distinct from numeric '5' (which is 53) — phone keypads have a
 // dedicated center-select button separate from the digit 5.
 pub const KEY_FIRE: i32 = -8;
-pub const KEY_SOFT1: i32 = '*';
-pub const KEY_SOFT2: i32 = '#';
+// Soft-key command codes, read from the framework's Displayable.onKeyPress
+// LOOKUPSWITCH (builtins class 0x02255f70, method 0x305ac1c2):
+//     key -8 (0xFFF8) → command index 1   (also selected by game-action FIRE)
+//     key -7 (0xFFF9) → command index 0
+// It then invokes the CommandListener's commandAction. Canonical delivers
+// these via VK_RETURN→-8 and VK_ESCAPE→-7 (sub_4375F0). Our frontend uses
+// ESC to quit, so both soft keys are surfaced on dedicated keys instead.
+pub const KEY_SOFT1: i32 = -8; // left / primary command (index 1)
+pub const KEY_SOFT2: i32 = -7; // right / secondary command (index 0)
 
 /// Per-tick pending keypress / release. Cleared after each tick()
 /// fire (so a single SDL key event maps to exactly one gamelet

@@ -46,6 +46,16 @@ const FIELD_MAP: u32 = 0xa6f1240f;
 const FIELD_MAP_W: u32 = 0xd042d0fe;
 const FIELD_MAP_H: u32 = 0xd042c2f5;
 
+// Graphics clip-rect fields — same synthetic slots Graphics.setClip (idx 11)
+// writes and drawImage/AnimBitmap read. Canonical RayCast.draw (sub_4284C9)
+// propagates the Graphics clip into the render descriptor via sub_425650 and
+// clips the 3D view to it; we mirror that so the raycaster stays inside its
+// viewport window and never overdraws the HUD above/below it.
+const FIELD_CLIP_X: u32 = 0xC1C1_5078;
+const FIELD_CLIP_Y: u32 = 0xC1C1_5079;
+const FIELD_CLIP_W: u32 = 0xC1C1_507A;
+const FIELD_CLIP_H: u32 = 0xC1C1_507B;
+
 const SPRITE_REC = 84; // bytes per sprite record
 const COL_REC = 8; // bytes per column-buffer record
 
@@ -166,113 +176,161 @@ fn sinA(circle: i32, a: i32) i32 {
     return @intFromFloat(@sin(rad) * 65536.0);
 }
 
-// ── The DDA ray (canonical sub_41F7F2) ─────────────────────────────────────
-// World Q16, cell = 64 units ⇒ cell index = coord>>22. Map bytes pack two
-// nibbles: HIGH = wall crossed on a horizontal grid line (marching in y),
-// LOW = wall crossed on a vertical grid line (marching in x); nibble 0 =
-// open. Returns the fisheye-corrected perpendicular distance plus hit
-// metadata. ⚠ re-derived from the spec as a standard two-axis DDA; sign
-// conventions verified visually (MutantAlert), not byte-stepped.
+// ── The DDA ray — faithful port of canonical sub_41F7F2 ────────────────────
+// World Q16, cell = 64 units ⇒ cell index = coord>>22 (one cell = 1<<22).
+// Two independent marches:
+//   • March 1 steps along world-y across horizontal grid lines; a wall there
+//     is the HIGH nibble (b>>4) of the cell AT the boundary (boundary>>22).
+//   • March 2 steps along world-x across vertical grid lines; a wall there is
+//     the LOW nibble (b&0xF).
+// The nearer hit (distance-along-ray = axis-delta / trig) wins. Distance is
+// returned in Q0 "64-per-cell" units — same scale as sprite depth and the
+// wall_h formula. tex_x is the 0..63 intra-cell hit coordinate, flipped per
+// march direction. Prior code re-derived this and checked `boundary-1` for
+// negative marches (off-by-one), so walls/doors dropped out depending on the
+// view angle; this mirrors the canonical cell selection exactly.
 
 const RayHit = struct {
-    dist: i32, // fisheye-corrected perpendicular distance (Q16)
-    raw: i32, // uncorrected distance to the hit side
+    dist: i32, // fisheye-corrected distance, Q0 units (64 per cell)
+    raw: i32, // nearer march distance along the ray, pre-fisheye (Q0)
     hit_x: i32,
     hit_y: i32,
     tex_id: u8,
     tex_x: u8,
 };
 
+fn absI64(v: i64) i64 {
+    return if (v < 0) -v else v;
+}
+
+fn clampI32(v: i64) i32 {
+    return @intCast(std.math.clamp(v, -0x7FFFFFFF, 0x7FFFFFFF));
+}
+
 fn castOneRay(ctx: *const Ctx, angle: i32, player_angle: i32) RayHit {
-    const circle = ebGet(ctx.state, 28);
-    const max_steps = ebGet(ctx.state, 0);
-    const px = ebGet(ctx.state, 80);
-    const py = ebGet(ctx.state, 84);
-    var out: RayHit = .{ .dist = 0, .raw = 0, .hit_x = px, .hit_y = py, .tex_id = 0, .tex_x = 0 };
+    const st = ctx.state;
+    const circle = ebGet(st, 28); // 360°
+    const a90 = ebGet(st, 44);
+    const a180 = ebGet(st, 48);
+    const a270 = ebGet(st, 52);
+    const max_steps = ebGet(st, 0);
+    const px: i64 = ebGet(st, 80);
+    const py: i64 = ebGet(st, 84);
+    var out: RayHit = .{ .dist = 0, .raw = 0, .hit_x = clampI32(px), .hit_y = clampI32(py), .tex_id = 0, .tex_x = 0 };
     const map = ctx.map orelse return out;
-    if (ctx.map_w <= 0 or ctx.map_h <= 0 or max_steps <= 0) return out;
+    const mw: i64 = ctx.map_w;
+    const mh: i64 = ctx.map_h;
+    if (mw <= 0 or mh <= 0 or max_steps <= 0) return out;
 
-    const c = cosA(circle, angle);
-    const s = sinA(circle, angle);
+    const c: i64 = cosA(circle, angle); // Q16
+    const s: i64 = sinA(circle, angle); // Q16
+    const CELL: i64 = 1 << 22;
 
-    const INF: i64 = 0x7FFFFFFF;
-    var best: i64 = INF;
-    var best_id: u8 = 0;
-    var best_tx: u8 = 0;
-    var best_hx: i32 = px;
-    var best_hy: i32 = py;
-
-    // March 1 — horizontal grid lines (stepping world-y), HIGH nibble.
-    if (s != 0) {
-        const step_y: i32 = if (s > 0) 1 else -1;
-        // First horizontal boundary above/below the player.
-        var gy: i32 = if (s > 0) ((py >> 22) + 1) << 22 else (py >> 22) << 22;
+    // ── March 1 — horizontal grid lines (world-y), HIGH nibble ──
+    var v14: i64 = 0x7FFFFFFF; // perp x-coord at the boundary
+    var v42: i64 = 0x7FFFFFFF; // y-coord of the boundary
+    var id1: u8 = 0;
+    var v38: i64 = 0; // ±CELL march step (0 when the ray is horizontal)
+    if (angle != a180 and angle != circle) {
+        if (angle <= a180 or angle >= circle) {
+            v42 = ((py >> 22) + 1) << 22;
+            v38 = CELL;
+        } else {
+            v42 = (py >> 22) << 22;
+            v38 = -CELL;
+        }
+        const v24 = v42 - py;
+        const v44: i64 = if ((s >> 1) != 0) @divTrunc((c >> 1) << 16, s >> 1) else 3200; // cot Q16
+        const v18 = (v38 >> 16) * v44;
+        const v15 = px + (v24 >> 16) * v44;
+        v14 = if (v18 >= 0) v15 + 0x7FFF else v15 - 0x7FFF;
         var i: i32 = 0;
         while (i < max_steps) : (i += 1) {
-            const dy: i64 = gy - py;
-            const dx: i64 = @divTrunc(dy * c, s);
-            const wx: i32 = px + @as(i32, @intCast(std.math.clamp(dx, -(1 << 30), 1 << 30)));
-            const cell_x = wx >> 22;
-            const cell_y = (if (s > 0) gy else gy - 1) >> 22;
-            if (cell_x < 0 or cell_y < 0 or cell_x >= ctx.map_w or cell_y >= ctx.map_h) break;
-            const b = map[@intCast(cell_y * ctx.map_w + cell_x)];
+            const cx = v14 >> 22;
+            const cy = v42 >> 22;
+            if (cx < 0 or cy < 0 or cx >= mw or cy >= mh) break;
+            const idx: usize = @intCast(cy * mw + cx);
+            if (idx >= map.len) break;
+            const b = map[idx];
             if ((b & 0xF0) != 0) {
-                // distance along the ray to this boundary
-                const d: i64 = @divTrunc((@as(i64, dy) << 16), if (s == 0) 1 else s);
-                const ad: i64 = if (d < 0) -d else d;
-                if (ad < best) {
-                    best = ad;
-                    best_id = b >> 4;
-                    best_tx = @intCast((wx >> 16) & 0x3F);
-                    best_hx = wx;
-                    best_hy = gy;
-                }
+                id1 = b >> 4;
                 break;
             }
-            gy += step_y << 22;
+            v14 += v18;
+            v42 += v38;
         }
     }
 
-    // March 2 — vertical grid lines (stepping world-x), LOW nibble.
-    if (c != 0) {
-        const step_x: i32 = if (c > 0) 1 else -1;
-        var gx: i32 = if (c > 0) ((px >> 22) + 1) << 22 else (px >> 22) << 22;
-        var i: i32 = 0;
-        while (i < max_steps) : (i += 1) {
-            const dx: i64 = gx - px;
-            const dy: i64 = @divTrunc(dx * s, c);
-            const wy: i32 = py + @as(i32, @intCast(std.math.clamp(dy, -(1 << 30), 1 << 30)));
-            const cell_y = wy >> 22;
-            const cell_x = (if (c > 0) gx else gx - 1) >> 22;
-            if (cell_x < 0 or cell_y < 0 or cell_x >= ctx.map_w or cell_y >= ctx.map_h) break;
-            const b = map[@intCast(cell_y * ctx.map_w + cell_x)];
+    // ── March 2 — vertical grid lines (world-x), LOW nibble ──
+    var v11: i64 = 0x7FFFFFFF; // perp y-coord at the boundary
+    var v28: i64 = 0x7FFFFFFF; // x-coord of the boundary
+    var id2: u8 = 0;
+    var v46: i64 = 0; // ±CELL march step (0 when the ray is vertical)
+    if (angle != a90 and angle != a270) {
+        if (angle <= a90 or angle >= a270) {
+            v28 = ((px >> 22) + 1) << 22;
+            v46 = CELL;
+        } else {
+            v28 = (px >> 22) << 22;
+            v46 = -CELL;
+        }
+        const v19 = v28 - px;
+        const v7: i64 = if (@divTrunc(c, 2) != 0) @divTrunc(@divTrunc(s, 2) << 16, @divTrunc(c, 2)) else 3200; // tan Q16
+        const v33 = (v46 >> 16) * v7;
+        const v12 = py + (v19 >> 16) * v7;
+        v11 = if (v33 >= 0) v12 + 0x7FFF else v12 - 0x7FFF;
+        var j: i32 = 0;
+        while (j < max_steps) : (j += 1) {
+            const cx = v28 >> 22;
+            const cy = v11 >> 22;
+            if (cx < 0 or cy < 0 or cx >= mw or cy >= mh) break;
+            const idx: usize = @intCast(cy * mw + cx);
+            if (idx >= map.len) break;
+            const b = map[idx];
             if ((b & 0x0F) != 0) {
-                const d: i64 = @divTrunc((@as(i64, dx) << 16), if (c == 0) 1 else c);
-                const ad: i64 = if (d < 0) -d else d;
-                if (ad < best) {
-                    best = ad;
-                    best_id = b & 0x0F;
-                    best_tx = @intCast(63 - ((wy >> 16) & 0x3F));
-                    best_hx = gx;
-                    best_hy = wy;
-                }
+                id2 = b & 0x0F;
                 break;
             }
-            gx += step_x << 22;
+            v28 += v46;
+            v11 += v33;
         }
     }
 
-    if (best == INF) return out;
-    out.raw = @intCast(@min(best, 0x7FFFFFFF));
-    // Fisheye correction: dist * cos(rayAngle − playerAngle) >> 16.
-    const rel = angle - player_angle;
-    var corrected: i64 = (best * cosA(circle, rel)) >> 16;
-    if (corrected <= 0) corrected = 1;
-    out.dist = @intCast(@min(corrected, 0x7FFFFFFF));
-    out.tex_id = best_id;
-    out.tex_x = best_tx;
-    out.hit_x = best_hx;
-    out.hit_y = best_hy;
+    // ── Pick the nearer march (distance along ray = axis-delta / trig) ──
+    const v32: i64 = if (s == 0) 0x7FFFFFFF else absI64(@divTrunc(v42 - py, s)); // horiz-march dist
+    const v45: i64 = if (c == 0) 0x7FFFFFFF else absI64(@divTrunc(v28 - px, c)); // vert-march dist
+    var v40: i64 = undefined;
+    const use_vertical = v32 >= v45;
+    if (use_vertical) {
+        v40 = v45;
+        out.hit_x = clampI32(v28);
+        out.hit_y = clampI32(v11);
+    } else {
+        v40 = v32;
+        out.hit_x = clampI32(v14);
+        out.hit_y = clampI32(v42);
+    }
+
+    // Fisheye correction: dist = |cos(rayAngle − playerAngle)| · v40 >> 16.
+    var v17 = angle - player_angle;
+    if (v17 < 0) v17 += circle;
+    if (v17 < 0) v17 += circle;
+    var v41: i64 = (@as(i64, cosA(circle, v17)) * v40) >> 16;
+    if (v41 >= 0) {
+        if (v41 == 0) v41 = 1;
+    } else v41 = -v41;
+
+    out.dist = clampI32(v41);
+    out.raw = clampI32(v40);
+    if (use_vertical) {
+        out.tex_id = id2;
+        const t: i64 = (v11 >> 16) & 0x3F;
+        out.tex_x = @intCast(if (v46 >= 0) t else 63 - t);
+    } else {
+        out.tex_id = id1;
+        const t: i64 = (v14 >> 16) & 0x3F;
+        out.tex_x = @intCast(if (v38 >= 0) 63 - t else t);
+    }
     return out;
 }
 
@@ -401,13 +459,16 @@ fn findFirstSpriteFreeID(vm: *Vm, args: bridge.ArgFrame) i16 {
         args.setReturn(0);
         return 1;
     };
-    if (ctx.sprites) |sp| {
-        var id: i32 = 0;
-        while (id < ctx.sprite_cap) : (id += 1) {
-            if (recGet(sp, id, 0) == 0) {
-                args.setReturnI32(id);
-                return 1;
-            }
+    // Canonical sub_4201BF: no sprite table → 0; else first free id; none → -1.
+    const sp = ctx.sprites orelse {
+        args.setReturnI32(0);
+        return 1;
+    };
+    var id: i32 = 0;
+    while (id < ctx.sprite_cap) : (id += 1) {
+        if (recGet(sp, id, 0) == 0) {
+            args.setReturnI32(id);
+            return 1;
         }
     }
     args.setReturnI32(-1);
@@ -503,7 +564,9 @@ fn castRay(vm: *Vm, args: bridge.ArgFrame) i16 {
     ebSet(ctx.state, 84, args.getI32(2));
     clampPos(&ctx);
     const angle = args.getI32(3);
-    const hit = castOneRay(&ctx, angle, angle); // corrected == raw here (rel=0)
+    // Canonical sub_428962 calls sub_41F7F2 without touching the player angle
+    // (+88): the fisheye correction stays relative to the CURRENT view angle.
+    const hit = castOneRay(&ctx, angle, ebGet(ctx.state, 88));
     out[0] = @bitCast(hit.hit_x);
     out[1] = @bitCast(hit.hit_y);
     out[2] = @bitCast(hit.raw);
@@ -518,9 +581,14 @@ fn castRay(vm: *Vm, args: bridge.ArgFrame) i16 {
 // Full frame: bind, set player, cast W/detail rays into the column
 // buffer, wall strips (height = projDist·wallScale/dist centered on the
 // horizon), then depth-sorted sprites with per-column occlusion.
-// ⚠ per-wall shade byte (EB+168, palette-bank select in canonical) is
-// not applied — we sample decoded ABGR directly; sprite image B (the
-// second facing) is used only when image A is missing.
+// ⚠ per-wall shade byte (EB+168) is NOT applied. In canonical (sub_41FEE7 →
+// device blit) it is `shadeTable[texId&0xF]` and selects a 16-colour palette
+// *bank* (index = nibble + bank*16) in the 4bpp wall texture. Our pipeline
+// pre-decodes each wall texture to ABGR at bank 0, so re-banking at draw time
+// would need a bank-aware texture decode. In MutantAlert the table is uniform
+// ([0,3,3,3,0…]) — every visible wall is bank 3 — so the missing effect is a
+// flat brightness shift, not distance/orientation shading.
+// sprite image B (the second facing) is used only when image A is missing.
 fn draw(vm: *Vm, args: bridge.ArgFrame) i16 {
     const ctx = bind(vm, args.this()) orelse return 0;
     const target = _h.graphicsTarget(vm, args.handle(1)) orelse return 0;
@@ -544,6 +612,29 @@ fn draw(vm: *Vm, args: bridge.ArgFrame) i16 {
 
     const tw: i32 = @intCast(target.width);
     const th: i32 = @intCast(target.height);
+
+    // Clip the 3D view to the Graphics viewport (set via setClip right before
+    // this draw). Matches drawImage/AnimBitmap so the raycaster renders only
+    // inside its window and leaves the HUD above/below intact. Falls back to
+    // the full target when no clip is set.
+    var clip_x0: i32 = 0;
+    var clip_y0: i32 = 0;
+    var clip_x1: i32 = tw;
+    var clip_y1: i32 = th;
+    if (vm.heap.get(args.handle(1))) |g| {
+        const gcw_u: u32 = g.field_map.get(FIELD_CLIP_W) orelse 0;
+        const gch_u: u32 = g.field_map.get(FIELD_CLIP_H) orelse 0;
+        if (gcw_u != 0 and gch_u != 0) {
+            const gcx: i32 = @bitCast(g.field_map.get(FIELD_CLIP_X) orelse 0);
+            const gcy: i32 = @bitCast(g.field_map.get(FIELD_CLIP_Y) orelse 0);
+            clip_x0 = @max(0, gcx);
+            clip_y0 = @max(0, gcy);
+            clip_x1 = @min(tw, gcx + @as(i32, @intCast(gcw_u)));
+            clip_y1 = @min(th, gcy + @as(i32, @intCast(gch_u)));
+            if (clip_x1 <= clip_x0 or clip_y1 <= clip_y0) return 0;
+        }
+    }
+
     const n_rays = @divTrunc(screen_w, detail);
 
     // 1. Cast rays → column records (also mirrored into the gamelet's
@@ -575,9 +666,9 @@ fn draw(vm: *Vm, args: bridge.ArgFrame) i16 {
                 var d: i32 = 0;
                 while (d < detail) : (d += 1) {
                     const dx = col * detail + d;
-                    if (dx < 0 or dx >= tw) continue;
-                    var y: i32 = @max(y0, 0);
-                    const y_end = @min(y0 + wall_h, th);
+                    if (dx < clip_x0 or dx >= clip_x1) continue;
+                    var y: i32 = @max(y0, clip_y0);
+                    const y_end = @min(y0 + wall_h, clip_y1);
                     while (y < y_end) : (y += 1) {
                         const ty = @divTrunc((y - y0) * tex.h, wall_h);
                         const sp = tex.px[@as(usize, @intCast(@min(ty, tex.h - 1))) * @as(usize, @intCast(tex.w)) + @as(usize, @intCast(sx))];
@@ -650,8 +741,8 @@ fn draw(vm: *Vm, args: bridge.ArgFrame) i16 {
         const ph = recGet(sp, sid, 18);
         const depth = recGet(sp, sid, 16);
 
-        var dx: i32 = @max(sx0, 0);
-        const dx_end = @min(sx0 + pw, @min(tw, screen_w));
+        var dx: i32 = @max(sx0, clip_x0);
+        const dx_end = @min(sx0 + pw, @min(clip_x1, screen_w));
         while (dx < dx_end) : (dx += 1) {
             // per-column occlusion vs the wall distance buffer
             if (ctx.colbuf) |cb| {
@@ -664,8 +755,8 @@ fn draw(vm: *Vm, args: bridge.ArgFrame) i16 {
             }
             const u = src_x + @divTrunc((dx - sx0) * src_w, pw);
             if (u < 0 or u >= tex.w) continue;
-            var dy: i32 = @max(sy0, 0);
-            const dy_end = @min(sy0 + ph, th);
+            var dy: i32 = @max(sy0, clip_y0);
+            const dy_end = @min(sy0 + ph, clip_y1);
             while (dy < dy_end) : (dy += 1) {
                 const v = src_y + @divTrunc((dy - sy0) * src_h, ph);
                 if (v < 0 or v >= tex.h) continue;
