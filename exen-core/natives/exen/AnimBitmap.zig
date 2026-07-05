@@ -182,7 +182,9 @@ fn blit(
     const ih: i32 = @intCast(src_inst.pix_h);
     if (sx < 0 or sy < 0 or sx + sw > iw or sy + sh > ih) return;
 
-    const flip_x = (mode == 2 or mode == 1 or mode == 4 or mode == 7);
+    // MIDP transform semantics: mode 1 = TRANS_MIRROR_ROT180 (flip-Y only),
+    // mode 3 = TRANS_ROT180 (flip-X + flip-Y). (Modes 4/7 keep existing flags.)
+    const flip_x = (mode == 2 or mode == 3 or mode == 4 or mode == 7);
     const flip_y = (mode == 1 or mode == 3 or mode == 4 or mode == 7);
     const silhouette_color: u32 = 0xff404040;
 

@@ -45,7 +45,14 @@ fn computeSinCos(x: i32, period: i32, want_sin: bool) i32 {
     const period_f = @as(f64, @floatFromInt(period));
     const angle_rad: f64 = (@as(f64, @floatFromInt(x)) / period_f) * std.math.tau;
     const r = if (want_sin) @sin(angle_rad) else @cos(angle_rad);
-    return @intFromFloat(r * 16384.0);
+    // Q16 amplitude (±65535), matching canonical. Canonical's sin/cos
+    // (sub_41C972) returns `(unsigned __int16)word_4567F8[...]`: the table
+    // stores sin·65535 as int16, and the unsigned cast means the entries
+    // that decompile as -1/-2/… are really 65535/65534/… — i.e. full Q16,
+    // NOT Q15. Callers do `val * sin >> 16`, so a smaller amplitude scales
+    // all trig-derived geometry down (e.g. the AoE menu's per-item radius
+    // step: at Q14 items overlapped at ~3px; Q16 gives the correct ~10px).
+    return @intFromFloat(r * 65535.0);
 }
 
 // All Math natives are canonical-shape: take (vm, args) and return push count.

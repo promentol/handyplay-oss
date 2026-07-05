@@ -120,8 +120,6 @@ fn drawImage(vm: *Vm, args: bridge.ArgFrame) i16 {
     const target = _h.graphicsTarget(vm, this) orelse return 0;
     const inst = vm.heap.get(image) orelse return 0;
 
-
-
     // Lazy palette decode (canonical sub_426785 + transformToSystemPalette).
     if (inst.pixels == null) _h.doTransformToSystemPalette(vm, image);
     const src_px = inst.pixels orelse return 0;
@@ -201,7 +199,10 @@ fn drawImage(vm: *Vm, args: bridge.ArgFrame) i16 {
 
     if (sw == dw and sh == dh) {
         // Unscaled — vtable[52], mode-aware
-        const flip_x = (mode == 2 or mode == 1 or mode == 4 or mode == 7);
+        // MIDP transform semantics: mode 1 = TRANS_MIRROR_ROT180 (flip-Y
+        // only), mode 3 = TRANS_ROT180 (flip-X + flip-Y). (Modes 4/7 keep
+        // their existing flags; the transpose cases are unverified here.)
+        const flip_x = (mode == 2 or mode == 3 or mode == 4 or mode == 7);
         const flip_y = (mode == 1 or mode == 3 or mode == 4 or mode == 7);
         const swap_xy = (mode >= 4);
         const out_w: i32 = if (swap_xy) sh else sw;
