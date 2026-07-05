@@ -16,6 +16,7 @@ const bridge = core.bridge;
 const Vm = interp.Vm;
 const Handle = bridge.Handle;
 
+pub const class_name: []const u8 = "Class";
 pub const first_index: u32 = 155;
 pub const last_index: u32 = 157;
 
@@ -169,8 +170,10 @@ fn arrayTypePrefix(hash: u32) ?[]const u8 {
     };
 }
 
-pub const handle = bridge.canonical(.{
-    .{ 155, "Class.forName",     forName },
-    .{ 156, "Class.newInstance", newInstance },
-    .{ 157, "Class.getName",     getName },
-});
+pub const entries = .{
+    .{ 155, "forName",     forName },
+    .{ 156, "newInstance", newInstance },
+    .{ 157, "getName",     getName },
+};
+
+pub const handle = bridge.canonical(entries);

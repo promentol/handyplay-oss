@@ -69,6 +69,12 @@ pub const Instance = struct {
     /// index 62, collapsing ball.x to 0 for every position past screen
     /// pixel 62. Freed by `heap.deinit`.
     ints: ?[]u32 = null,
+    /// Byte width of one `.bytes` element, set by NEWARRAY from the array
+    /// tag's canonical stride `1 << ((tag>>2)&3)`. 1 for byte[]/char[]
+    /// (tags whose char mask 0x50 matches — packed 1-byte, load-bearing
+    /// for the ASCII text path), 2 for short-only arrays (tag 0x15: matches
+    /// the short mask 0x15 but NOT the char mask 0x50). SALOAD/SASTORE use
+    /// this to pick 2-byte-at-2*idx signed access vs the 1-byte fallback.
     /// Image descriptor (canonical `image+40` struct). Set by
     /// `image.Init` via `sub_4176C7`; consumed by every Graphics
     /// drawing primitive. `origin_*` is the target-local coordinate
@@ -122,7 +128,9 @@ pub const Heap = struct {
 
     /// A buffer is freeable only if non-empty (zero-length slices carry a sentinel
     /// pointer that isn't a real allocation) and resident in the object arena.
-    fn freeable(self: *const Heap, ptr: usize, len: usize) bool {
+    /// Pub so natives that swap an Instance-owned buffer (e.g. Image.init's
+    /// pixel-buffer resize) can apply the same ownership rule.
+    pub fn freeable(self: *const Heap, ptr: usize, len: usize) bool {
         return len > 0 and ptr >= self.arena_lo and ptr < self.arena_hi;
     }
 

@@ -41,3 +41,20 @@ pub fn opLreturn(_: *Vm, frame: *Frame, _: u8) Error!void {
     frame.ret_slots = 2;
     frame.returning = true;
 }
+
+/// ATHROW (opcode 0xbf, canonical sub_408DBD → sub_409651). Pops the
+/// exception reference and raises it.
+///
+/// ⚠ Partial port. Canonical walks each frame's handler table looking
+/// for a matching catch and unwinds to it; that handler-table
+/// infrastructure does not exist in our VM yet. Until it does, every
+/// throw is treated as uncaught: we signal the same non-catchable
+/// Internal Exception path a null-receiver takes (`signalFault`), so the
+/// tick aborts cleanly and `exen.tick` resumes on the next frame — as
+/// opposed to the generic `unimpl` halt, which would mislabel it as an
+/// unbound opcode. No corpus gamelet throws on a live path today.
+pub fn opAthrow(vm: *Vm, frame: *Frame, _: u8) Error!void {
+    const ex = try frame.pop();
+    vm.signalFault(Vm.EX_NULL_POINTER, "ATHROW (no handler-table unwind)");
+    log.warn("  ATHROW ref=0x{x:0>8} — treated as uncaught", .{ex});
+}

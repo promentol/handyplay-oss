@@ -39,6 +39,7 @@ const bridge = core.bridge;
 const Vm = interp.Vm;
 const Handle = bridge.Handle;
 
+pub const class_name: []const u8 = "StringBuffer";
 pub const first_index: u32 = 166;
 pub const last_index: u32 = 174;
 
@@ -284,7 +285,7 @@ fn toStringOp(vm: *Vm, args: bridge.ArgFrame) i16 {
     return 1;
 }
 
-pub const handle = bridge.canonical(.{
+pub const entries = .{
     .{ 166, "initStringBuffer",     ctorInit },
     .{ 167, "length",               length },
     .{ 168, "capacity",             capacity },
@@ -294,4 +295,6 @@ pub const handle = bridge.canonical(.{
     .{ 172, "append(int)",          appendInt },
     .{ 173, "append(long)",         appendLong },
     .{ 174, "toString",             toStringOp },
-});
+};
+
+pub const handle = bridge.canonical(entries);

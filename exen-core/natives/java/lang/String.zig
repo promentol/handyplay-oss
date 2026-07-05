@@ -22,6 +22,7 @@ const bridge = core.bridge;
 const Vm = interp.Vm;
 const Handle = bridge.Handle;
 
+pub const class_name: []const u8 = "String";
 pub const first_index: u32 = 158;
 pub const last_index: u32 = 165;
 
@@ -267,7 +268,7 @@ fn integerToString(vm: *Vm, args: bridge.ArgFrame) i16 {
     return 1;
 }
 
-pub const handle = bridge.canonical(.{
+pub const entries = .{
     .{ 158, "length",                length },
     .{ 159, "getBytes",              getBytes },
     .{ 160, "toLowerCase",           toLowerCase },
@@ -276,4 +277,6 @@ pub const handle = bridge.canonical(.{
     .{ 163, "<init>(byte[])",        ctorFromBytes },
     .{ 164, "toUpperCase",           toUpperCase },
     .{ 165, "Integer.toString(int)", integerToString },
-});
+};
+
+pub const handle = bridge.canonical(entries);

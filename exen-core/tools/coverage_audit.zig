@@ -1,116 +1,50 @@
 //! Static coverage audit — walks a gamelet's bytecode and reports:
 //!   (1) opcodes our VM doesn't have a handler bound for (= would halt),
-//!   (2) INVOKE call sites whose method-hash doesn't resolve to a name
+//!   (2) native methods this gamelet's bytecode invokes (or its own classes
+//!       declare) whose `funcs_407AA2[]` idx has no real Zig handler
+//!       (= would hit `defaultNativeStub` and silently push 0),
+//!   (3) INVOKE call sites whose method-hash doesn't resolve to a name
 //!       in `core/debug/names.zig::methodName()` (= unknown bytecode
 //!       methods or unnamed natives).
 //!
 //! Usage:
-//!   zig run tools/coverage_audit.zig -- samples/wallbreaker.exn
-//!   zig run tools/coverage_audit.zig -- samples/wallbreaker.exn 0xd836a3ce
+//!   zig build coverage -- samples/wallbreaker.exn
+//!   zig build coverage -- samples/wallbreaker.exn 0xd836a3ce
 //!
 //! Output is grouped:
 //!   ── UNBOUND OPCODES ──    (op → list of call sites class.method@pc)
+//!   ── UNBOUND NATIVES ──    (idx → name, canonical sub, call-site count)
 //!   ── UNRESOLVED INVOKES ── ((class?, method_hash) → list of call sites)
+//!
+//! Opcode boundness comes from the REAL dispatch table
+//! (`core.opcodes.buildOpTable()`), native boundness from the REAL entry
+//! lists (`natives.bound_natives`) — neither can drift from the runtime.
+//! Native declarations are read from the built-in classes
+//! (`assets/unk_4494F0.bin`, same blob the VM boots from) plus the
+//! gamelet's own classes; a native method's idx is the u32 at its
+//! `body_offset`, exactly what `MethodInfo.nativeIndex()` reads.
 //!
 //! Distinct from the runtime trace: this finds gaps in code paths that
 //! haven't been exercised at runtime, so we can pre-empt halts.
 
 const std = @import("std");
 const core = @import("core");
+const natives = @import("natives");
 const class_registry = core.class_registry;
 const dbg = core.debug;
 
-/// Mirror of `core/vm/opcodes/mod.zig::buildOpTable`. Each entry is
-/// `true` if the opcode is bound to a real handler (NOT `unimpl`).
-const BOUND: [256]bool = blk: {
-    var t: [256]bool = [_]bool{false} ** 256;
-    // consts
-    t[0x00] = true; t[0x01] = true;
-    t[0x02] = true; t[0x03] = true; t[0x04] = true; t[0x05] = true;
-    t[0x06] = true; t[0x07] = true; t[0x08] = true;
-    t[0x10] = true; t[0x11] = true; t[0x12] = true; t[0x14] = true;
-    t[0xD0] = true;
-    // load/store
-    t[0x19] = true; t[0x2A] = true; t[0x2B] = true; t[0x2C] = true; t[0x2D] = true;
-    t[0x3A] = true; t[0x4A] = true; t[0x4B] = true; t[0x4C] = true; t[0x4D] = true; t[0x4E] = true;
-    t[0xD5] = true; t[0xD6] = true;
-    t[0xD9] = true; t[0xDA] = true; t[0xDB] = true; t[0xDC] = true;
-    t[0xDD] = true; t[0xDE] = true; t[0xDF] = true; t[0xE0] = true;
-    t[0xE1] = true; t[0xE2] = true; t[0xE3] = true; t[0xE4] = true;
-    t[0xE5] = true; t[0xE6] = true; t[0xE7] = true; t[0xE8] = true;
-    // stack
-    t[0x56] = true; t[0x57] = true; t[0x58] = true; t[0x59] = true;
-    t[0x5A] = true; t[0x5C] = true;
-    // arithmetic + conversions
-    t[0x60] = true; t[0x61] = true; t[0x64] = true; t[0x65] = true;
-    t[0x68] = true; t[0x6C] = true; t[0x70] = true; t[0x74] = true;
-    t[0x78] = true; t[0x7A] = true; t[0x7C] = true;
-    t[0x7E] = true; t[0x80] = true; t[0x82] = true; t[0x84] = true;
-    t[0x91] = true; t[0x92] = true; t[0x93] = true;
-    // arrays
-    t[0x2E] = true; t[0x32] = true; t[0x33] = true; t[0x34] = true; t[0x35] = true;
-    t[0x4F] = true; t[0x50] = true; t[0x51] = true; t[0x52] = true;
-    t[0x53] = true; t[0x54] = true; t[0x55] = true;
-    t[0xBC] = true; t[0xBE] = true;
-    // object
-    t[0xBB] = true; t[0xC0] = true; t[0xC1] = true;
-    // returns
-    t[0xB0] = true; t[0xB1] = true; t[0xE9] = true; t[0xEA] = true;
-    // branches
-    t[0x99] = true; t[0x9A] = true; t[0x9B] = true; t[0x9C] = true;
-    t[0x9D] = true; t[0x9E] = true;
-    t[0x9F] = true; t[0xA0] = true; t[0xA1] = true; t[0xA2] = true;
-    t[0xA3] = true; t[0xA4] = true;
-    t[0xA5] = true; t[0xA6] = true; t[0xA7] = true;
-    t[0xC6] = true; t[0xC7] = true;
-    // switch
-    t[0xCC] = true; t[0xCD] = true;
-    // invoke
-    t[0xED] = true; t[0xEE] = true; t[0xEF] = true;
-    t[0xF0] = true; t[0xF1] = true; t[0xF2] = true;
-    // field
-    t[0xF3] = true; t[0xF4] = true; t[0xF5] = true; t[0xF6] = true;
-    t[0xF7] = true; t[0xF8] = true; t[0xF9] = true; t[0xFA] = true;
-    break :blk t;
-};
+/// The real dispatch table. A slot still pointing at `unimpl` is unbound
+/// (would halt the VM). Slots bound to `opNoop` are deliberate no-ops
+/// (canonical empty slots) and count as bound.
+const OP_TABLE: [256]core.opcodes.Handler = core.opcodes.buildOpTable();
 
-/// Per-opcode operand widths. Mirrors `tools/disasm.zig::OPS`.
-///   0   → no immediate
-///   1   → one u8 immediate (no alignment)
-///   2   → one u16 immediate, 2-byte aligned (PC = (PC+2) & ~1)
-///   -1  → variable (TABLESWITCH/LOOKUPSWITCH)
-///   -2  → IINC (u8 slot + s8 delta, no alignment)
-const OPERANDS: [256]i32 = blk: {
-    var t: [256]i32 = [_]i32{0} ** 256;
-    // 1-byte immediates
-    t[0x10] = 1; t[0x19] = 1; t[0x3A] = 1; t[0x4A] = 1;
-    t[0xD5] = 1; t[0xD6] = 1;
-    t[0x15] = 1; t[0x16] = 1; t[0x17] = 1; t[0x18] = 1;
-    t[0x36] = 1; t[0x37] = 1; t[0x38] = 1; t[0x39] = 1;
-    // 2-byte u16 immediates
-    t[0x11] = 2; t[0x12] = 2; t[0x14] = 2; t[0xD0] = 2;
-    t[0x99] = 2; t[0x9A] = 2; t[0x9B] = 2; t[0x9C] = 2;
-    t[0x9D] = 2; t[0x9E] = 2;
-    t[0x9F] = 2; t[0xA0] = 2; t[0xA1] = 2; t[0xA2] = 2;
-    t[0xA3] = 2; t[0xA4] = 2;
-    t[0xA5] = 2; t[0xA6] = 2; t[0xA7] = 2;
-    t[0xA8] = 2;
-    t[0xBB] = 2; t[0xBC] = 2; t[0xBD] = 2;
-    t[0xC0] = 2; t[0xC1] = 2; t[0xC5] = 2;
-    t[0xC6] = 2; t[0xC7] = 2;
-    t[0xC8] = 2; t[0xC9] = 2;
-    t[0xED] = 2; t[0xEE] = 2; t[0xEF] = 2;
-    t[0xF0] = 2; t[0xF1] = 2; t[0xF2] = 2;
-    t[0xF3] = 2; t[0xF4] = 2; t[0xF5] = 2; t[0xF6] = 2;
-    t[0xF7] = 2; t[0xF8] = 2; t[0xF9] = 2; t[0xFA] = 2;
-    t[0xB2] = 2; t[0xB3] = 2; t[0xB4] = 2; t[0xB5] = 2;
-    t[0xB6] = 2; t[0xB7] = 2; t[0xB8] = 2; t[0xB9] = 2;
-    // IINC
-    t[0x84] = -2;
-    // switches
-    t[0xAA] = -1; t[0xAB] = -1; t[0xCC] = -1; t[0xCD] = -1;
-    break :blk t;
-};
+fn opBound(op: u8) bool {
+    return OP_TABLE[op] != core.opcodes.unimpl;
+}
+
+/// Per-opcode operand widths — straight from the op_specs single source
+/// (encoding documented on `core.opcodes.OpSpec.width`).
+const OPERANDS: [256]i8 = core.opcodes.operand_widths;
 
 const INVOKE_OPS = [_]u8{ 0xED, 0xEE, 0xEF, 0xF0, 0xF1, 0xF2 };
 fn isInvoke(op: u8) bool {
@@ -127,15 +61,38 @@ const CallSite = struct {
     invoked_method: u32,
 };
 
+/// A native method declaration whose dispatch idx has no real Zig handler
+/// (idx out of range, whole-class stub, or intra-range gap).
+const NativeDecl = struct {
+    class_hash: u32,
+    method_hash: u32,
+    idx: u32,
+    origin: class_registry.ClassRecord.Origin,
+    /// Direct INVOKE sites in the GAMELET's bytecode whose descriptor
+    /// method-hash matches this decl. Matching is by hash only (receiver
+    /// class unknown statically), so same-hash decls across classes each
+    /// get the count — an over-approximation used purely as a priority
+    /// hint. Indirect chains (gamelet → built-in bytecode → native) are
+    /// NOT counted; a 0 here does not prove the native is unreachable.
+    call_sites: u32 = 0,
+};
+
 const Report = struct {
     unbound: std.AutoArrayHashMap(u8, std.ArrayList(CallSite)),
     unresolved: std.AutoArrayHashMap(u64, std.ArrayList(CallSite)),
+    /// Declared-but-stubbed natives (built-ins + gamelet classes).
+    unbound_natives: std.ArrayList(NativeDecl),
+    /// method_hash → indices into `unbound_natives` (hash collisions across
+    /// classes are real — e.g. every class's `<init>` — hence a list).
+    native_by_hash: std.AutoHashMap(u32, std.ArrayList(usize)),
     allocator: std.mem.Allocator,
 
     fn init(a: std.mem.Allocator) Report {
         return .{
             .unbound = std.AutoArrayHashMap(u8, std.ArrayList(CallSite)).init(a),
             .unresolved = std.AutoArrayHashMap(u64, std.ArrayList(CallSite)).init(a),
+            .unbound_natives = .empty,
+            .native_by_hash = std.AutoHashMap(u32, std.ArrayList(usize)).init(a),
             .allocator = a,
         };
     }
@@ -146,6 +103,10 @@ const Report = struct {
         var it2 = self.unresolved.iterator();
         while (it2.next()) |e| e.value_ptr.deinit(self.allocator);
         self.unresolved.deinit();
+        self.unbound_natives.deinit(self.allocator);
+        var it3 = self.native_by_hash.valueIterator();
+        while (it3.next()) |l| l.deinit(self.allocator);
+        self.native_by_hash.deinit();
     }
 
     fn addUnbound(self: *Report, site: CallSite) !void {
@@ -158,6 +119,18 @@ const Report = struct {
         const gop = try self.unresolved.getOrPut(key);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
         try gop.value_ptr.append(self.allocator, site);
+    }
+    fn addUnboundNative(self: *Report, decl: NativeDecl) !void {
+        const list_idx = self.unbound_natives.items.len;
+        try self.unbound_natives.append(self.allocator, decl);
+        const gop = try self.native_by_hash.getOrPut(decl.method_hash);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(self.allocator, list_idx);
+    }
+    /// Called for every INVOKE descriptor hash seen in gamelet bytecode.
+    fn countNativeCallSite(self: *Report, m_hash: u32) void {
+        const list = self.native_by_hash.get(m_hash) orelse return;
+        for (list.items) |ni| self.unbound_natives.items[ni].call_sites += 1;
     }
 };
 
@@ -178,6 +151,20 @@ fn walkMethod(
         var next_pc: usize = pc + 1;
         if (operand == -2) {
             next_pc = pc + 3;
+        } else if (operand == -3 or operand == -4) {
+            // NEWARRAY (-3) / MULTIANEWARRAY (-4): aligned u16 type tag
+            // (MULTI has a u8 dim first), plus a second u16 element-class
+            // ref iff the tag low byte is 0x99 (canonical sub_40EE4D
+            // `v0 == 153`). Without this the walker reads the class-ref
+            // bytes as opcodes and desyncs — the source of most phantom
+            // "unbound opcode" reports across the corpus.
+            const tag_off = if (operand == -3)
+                (pc + 2) & ~@as(usize, 1)
+            else
+                (pc + 3) & ~@as(usize, 1);
+            if (tag_off + 2 > cls.bytes.len) break;
+            const tag = std.mem.readInt(u16, cls.bytes[tag_off..][0..2], .little);
+            next_pc = tag_off + 2 + @as(usize, if ((tag & 0xFF) == 0x99) 2 else 0);
         } else if (operand == -1) {
             // align to 2-byte boundary AFTER the opcode
             const aligned = (pc + 1 + 1) & ~@as(usize, 1);
@@ -188,7 +175,17 @@ fn walkMethod(
                 const span: i32 = @as(i32, hi) - @as(i32, lo) + 1;
                 const count: usize = if (span > 0) @intCast(span) else 0;
                 next_pc = aligned + 6 + count * 2;
-            } else { // LOOKUPSWITCH 0xAB / 0xCC
+            } else if (op == 0xAB) {
+                // LOOKUPSWITCH_W (opLookupswitchW): u16 default, u16 count,
+                // pad to 4-byte boundary, u32 keys[count], u16 targets[count].
+                // Distinct from 0xCC — mis-stepping this as the 0xCC layout
+                // drifted the walker into the jump table (the source of the
+                // Pikubi2/MutantAlert/AoE/MidtownMadness3 phantom opcodes).
+                if (aligned + 4 > cls.bytes.len) break;
+                const count = std.mem.readInt(u16, cls.bytes[aligned + 2 ..][0..2], .little);
+                const keys_base = (aligned + 4 + 3) & ~@as(usize, 3);
+                next_pc = keys_base + @as(usize, count) * 6; // u32 key + u16 target each
+            } else { // LOOKUPSWITCH 0xCC — u16 default, u16 count, count×(u16 key, u16 target)
                 if (aligned + 4 > cls.bytes.len) break;
                 const npairs = std.mem.readInt(u16, cls.bytes[aligned + 2 ..][0..2], .little);
                 next_pc = aligned + 4 + @as(usize, npairs) * 4;
@@ -203,7 +200,7 @@ fn walkMethod(
         // Record unbound opcodes (excluding stuff that's actually padding /
         // descriptor-region noise — we stop walking at return/branch as a
         // simple proxy for method boundary).
-        if (!BOUND[op]) {
+        if (!opBound(op)) {
             try report.addUnbound(.{
                 .class_hash = cls.hash,
                 .method_hash = method_hash,
@@ -221,6 +218,8 @@ fn walkMethod(
                 const desc_off = std.mem.readInt(u16, cls.bytes[aligned..][0..2], .little);
                 if (@as(usize, desc_off) + 4 <= cls.bytes.len) {
                     const m_hash = std.mem.readInt(u32, cls.bytes[desc_off..][0..4], .little);
+                    // Count call sites against declared-but-stubbed natives.
+                    report.countNativeCallSite(m_hash);
                     // Try class-scoped name first; fall back to unscoped.
                     if (dbg.methodName(cls.hash, m_hash) == null) {
                         if (dbg.methodNameUnscoped(m_hash) == null) {
@@ -248,6 +247,38 @@ fn walkMethod(
     }
 }
 
+/// Pass A — record every native-flagged method whose dispatch idx has no
+/// real Zig handler. Runs over ALL classes (built-ins + gamelet): natives
+/// are declared by the built-in API classes, but which of them matter is
+/// decided later by gamelet call sites (see NativeDecl.call_sites).
+fn collectNatives(report: *Report, cls: class_registry.ClassRecord) !void {
+    const mc = cls.methodCount();
+    var p = cls.firstMethodInfoOffset();
+    var i: u16 = 0;
+    while (i < mc) : (i += 1) {
+        if (p + 12 > cls.bytes.len) break;
+        const m_hash = std.mem.readInt(u32, cls.bytes[p..][0..4], .little);
+        const flags = std.mem.readInt(u16, cls.bytes[p + 4 ..][0..2], .little);
+        const body_off = std.mem.readInt(u16, cls.bytes[p + 8 ..][0..2], .little);
+        if ((flags & 0x100) != 0 and @as(usize, body_off) + 4 <= cls.bytes.len) {
+            // For a native method the u32 at body_offset IS the
+            // funcs_407AA2[] idx — same read as MethodInfo.nativeIndex().
+            const idx = std.mem.readInt(u32, cls.bytes[body_off..][0..4], .little);
+            if (idx >= natives.NATIVE_COUNT or !natives.bound_natives[idx]) {
+                try report.addUnboundNative(.{
+                    .class_hash = cls.hash,
+                    .method_hash = m_hash,
+                    .idx = idx,
+                    .origin = cls.origin,
+                });
+            }
+        }
+        p = (p + 15) & ~@as(usize, 3);
+    }
+}
+
+/// Pass B — bytecode walk (opcode audit + invoke resolution + native
+/// call-site counting). Gamelet classes only.
 fn walkClass(report: *Report, cls: class_registry.ClassRecord, filter: ?u32) !void {
     if (filter) |want| if (cls.hash != want) return;
     const mc = cls.methodCount();
@@ -259,7 +290,15 @@ fn walkClass(report: *Report, cls: class_registry.ClassRecord, filter: ?u32) !vo
         const flags = std.mem.readInt(u16, cls.bytes[p + 4 ..][0..2], .little);
         const body_off = std.mem.readInt(u16, cls.bytes[p + 8 ..][0..2], .little);
         const is_native = (flags & 0x100) != 0;
-        if (!is_native) try walkMethod(report, cls, m_hash, body_off);
+        // Skip abstract methods (ACC_ABSTRACT 0x400) and any method with
+        // no body: body_off == 0 means "no bytecode" — walking from
+        // body_off+6 would disassemble the class-record header as
+        // instructions (the source of the Pikubi/MotoGp/download1
+        // phantom-opcode reports; verified all such sites are 0x400).
+        const is_abstract = (flags & 0x400) != 0;
+        if (!is_native and !is_abstract and body_off != 0) {
+            try walkMethod(report, cls, m_hash, body_off);
+        }
         p = (p + 15) & ~@as(usize, 3);
     }
 }
@@ -286,15 +325,35 @@ pub fn main() !void {
 
     var reg = class_registry.Registry.init(a);
     defer reg.deinit();
-    const n = try reg.scanBuffer(raw, tail_start, .gamelet);
+
+    // Built-ins first (same order as exen.boot) — they hold the native
+    // method declarations. Missing blob = natives section degrades to
+    // gamelet-declared natives only; warn but keep going.
+    const builtins_blob: ?[]u8 = std.fs.cwd().readFileAlloc(a, "assets/unk_4494F0.bin", 1 << 20) catch null;
+    defer if (builtins_blob) |b| a.free(b);
+    var builtin_n: u32 = 0;
+    if (builtins_blob) |blob| {
+        builtin_n = try reg.scanBuffer(blob, 0, .builtin);
+    }
+    const gamelet_n = try reg.scanBuffer(raw, tail_start, .gamelet);
+    const n: u32 = builtin_n + gamelet_n;
 
     var report = Report.init(a);
     defer report.deinit();
 
+    // Pass A: native decls from every class (built-in + gamelet).
     var i: u16 = 0;
     while (i < n) : (i += 1) {
         const hash = reg.by_index.get(i) orelse continue;
         const cls = reg.lookup(hash) orelse continue;
+        try collectNatives(&report, cls);
+    }
+    // Pass B: bytecode walk over the gamelet's classes only.
+    i = 0;
+    while (i < n) : (i += 1) {
+        const hash = reg.by_index.get(i) orelse continue;
+        const cls = reg.lookup(hash) orelse continue;
+        if (cls.origin != .gamelet) continue;
         try walkClass(&report, cls, class_filter);
     }
 
@@ -304,7 +363,11 @@ pub fn main() !void {
     const out = &stdout_writer.interface;
     defer out.flush() catch {};
 
-    try out.print("=== coverage audit: {s} ({d} classes) ===\n\n", .{ path, n });
+    try out.print("=== coverage audit: {s} ({d} gamelet classes + {d} built-ins) ===\n\n", .{ path, gamelet_n, builtin_n });
+    if (builtins_blob == null) {
+        try out.print("  ⚠ assets/unk_4494F0.bin not found — natives section covers\n", .{});
+        try out.print("    gamelet-declared natives only (built-in decls unavailable)\n\n", .{});
+    }
 
     try out.print("── UNBOUND OPCODES ──\n", .{});
     if (report.unbound.count() == 0) {
@@ -313,8 +376,8 @@ pub fn main() !void {
         var it = report.unbound.iterator();
         while (it.next()) |e| {
             const sites = e.value_ptr.items;
-            try out.print("  op 0x{x:0>2}  ({d} site{s})\n", .{
-                e.key_ptr.*, sites.len, if (sites.len == 1) "" else "s",
+            try out.print("  op 0x{x:0>2} {s}  ({d} site{s})\n", .{
+                e.key_ptr.*, core.opcodes.opName(e.key_ptr.*), sites.len, if (sites.len == 1) "" else "s",
             });
             const cap = @min(sites.len, 5);
             for (sites[0..cap]) |s| {
@@ -323,6 +386,46 @@ pub fn main() !void {
                 });
             }
             if (sites.len > 5) try out.print("    ... +{d} more\n", .{sites.len - 5});
+        }
+    }
+
+    // Unbound natives: only rows this gamelet can plausibly hit — its
+    // bytecode invokes the hash, or its own classes declare the native.
+    // (A built-in decl with zero gamelet call sites is corpus-wide noise:
+    // it would print identically for every gamelet.)
+    try out.print("\n── UNBOUND NATIVES (would hit defaultNativeStub) ──\n", .{});
+    {
+        var rows: std.ArrayList(NativeDecl) = .empty;
+        defer rows.deinit(a);
+        for (report.unbound_natives.items) |d| {
+            if (d.call_sites > 0 or d.origin == .gamelet) try rows.append(a, d);
+        }
+        std.mem.sort(NativeDecl, rows.items, {}, struct {
+            fn lt(_: void, x: NativeDecl, y: NativeDecl) bool {
+                return x.idx < y.idx;
+            }
+        }.lt);
+        if (rows.items.len == 0) {
+            try out.print("  (none — every native this gamelet touches has a real handler)\n", .{});
+        } else for (rows.items) |d| {
+            if (d.idx >= natives.NATIVE_COUNT) {
+                try out.print("  idx {d:>3}  OUT OF RANGE — UnknownNative  declared by 0x{x:0>8} method=0x{x:0>8}\n", .{
+                    d.idx, d.class_hash, d.method_hash,
+                });
+                continue;
+            }
+            // Verified (class,method)-scoped name first; else the
+            // entries-derived table (single source with dispatch truth).
+            const name = dbg.methodName(d.class_hash, d.method_hash) orelse natives.native_names[d.idx];
+            try out.print("  idx {d:>3}  {s:<28} {s:<12} declared by {s} — {d} call site{s}{s}\n", .{
+                d.idx,
+                name,
+                dbg.nativeSubName(d.idx),
+                dbg.className(d.class_hash) orelse "0x????????",
+                d.call_sites,
+                if (d.call_sites == 1) "" else "s",
+                if (d.call_sites == 0) " (declared by gamelet, never invoked directly)" else "",
+            });
         }
     }
 
@@ -363,8 +466,19 @@ pub fn main() !void {
     var total_unresolved: usize = 0;
     var it2 = report.unresolved.iterator();
     while (it2.next()) |e| total_unresolved += e.value_ptr.items.len;
+    var native_rows: usize = 0;
+    var native_calls: usize = 0;
+    for (report.unbound_natives.items) |d| {
+        if (d.call_sites > 0 or d.origin == .gamelet) {
+            native_rows += 1;
+            native_calls += d.call_sites;
+        }
+    }
     try out.print("  unbound opcode sites:        {d} (across {d} distinct opcode bytes)\n", .{
         total_unbound, report.unbound.count(),
+    });
+    try out.print("  unbound natives touched:     {d} (with {d} direct call sites)\n", .{
+        native_rows, native_calls,
     });
     try out.print("  unresolved INVOKE sites:     {d} (across {d} distinct method hashes)\n", .{
         total_unresolved, report.unresolved.count(),

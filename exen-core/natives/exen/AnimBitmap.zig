@@ -20,6 +20,7 @@ const Handle = bridge.Handle;
 // TEMP DIAG — Phase 1 of HUD-frame-over-sprites investigation.
 const clip_diag = std.log.scoped(.clip_diag);
 
+pub const class_name: []const u8 = "AnimBitmap";
 pub const first_index: u32 = 43;
 pub const last_index: u32 = 45;
 
@@ -162,6 +163,8 @@ fn computeFrameRect(vm: *Vm, this: Handle, idx_in: i32) FrameRect {
 // sub_418008. `mode` is the J2ME TRANS_* transform (flip/rotate). `kernel`
 // is the canonical `a11`/`v6` selector: 4 = normal sprite content;
 // 3 = silhouette pass.
+const Clip = struct { x0: i32, y0: i32, x1: i32, y1: i32 };
+
 fn blit(
     target: _h.DrawTarget,
     src_inst: *interp.Instance,
@@ -169,14 +172,15 @@ fn blit(
     dx: i32, dy: i32,
     mode: u32,
     kernel: u32,
+    tr_skip_idx: ?u8,
+    cl: Clip,
 ) void {
     const src_px = src_inst.pixels orelse return;
+    const src_idx_buf: ?[]const u8 = src_inst.pixel_indices;
     if (sw <= 0 or sh <= 0) return;
     const iw: i32 = @intCast(src_inst.pix_w);
     const ih: i32 = @intCast(src_inst.pix_h);
     if (sx < 0 or sy < 0 or sx + sw > iw or sy + sh > ih) return;
-    const tw: i32 = @intCast(target.width);
-    const th: i32 = @intCast(target.height);
 
     const flip_x = (mode == 2 or mode == 1 or mode == 4 or mode == 7);
     const flip_y = (mode == 1 or mode == 3 or mode == 4 or mode == 7);
@@ -185,11 +189,11 @@ fn blit(
     var j: i32 = 0;
     while (j < sh) : (j += 1) {
         const py = dy + j;
-        if (py < 0 or py >= th) continue;
+        if (py < cl.y0 or py >= cl.y1) continue;
         var i: i32 = 0;
         while (i < sw) : (i += 1) {
             const px_x = dx + i;
-            if (px_x < 0 or px_x >= tw) continue;
+            if (px_x < cl.x0 or px_x >= cl.x1) continue;
             const u: i32 = if (flip_x) sw - 1 - i else i;
             const v: i32 = if (flip_y) sh - 1 - j else j;
             const sxx: usize = @intCast(sx + u);
@@ -198,6 +202,18 @@ fn blit(
             if (src_idx >= src_px.len) continue;
             const p = src_px[src_idx];
             if ((p >> 24) == 0) continue;
+            // Index-based transparency (setPaletteAlpha / setTransparentColor):
+            // skip pixels whose SOURCE palette index is the transparent one.
+            // Mirrors Graphics.drawImage — canonical applies the transparent
+            // index uniformly across the blit primitives, but our AnimBitmap
+            // path previously honoured only alpha-0 (tRNS), leaving sprites
+            // whose transparency is index-based (e.g. Spyro) with an opaque
+            // index-0 background.
+            if (tr_skip_idx) |tk| {
+                if (src_idx_buf) |idxbuf| {
+                    if (src_idx < idxbuf.len and idxbuf[src_idx] == tk) continue;
+                }
+            }
             const write_px = if (kernel == 3) silhouette_color else p;
             target.pixels[@as(usize, @intCast(py)) * target.width + @as(usize, @intCast(px_x))] = write_px;
         }
@@ -245,6 +261,30 @@ fn draw(vm: *Vm, args: bridge.ArgFrame) i16 {
 
     const inst = vm.heap.get(this) orelse return 0;
     const target = _h.graphicsTarget(vm, graphics) orelse return 0;
+
+    // Honour the Graphics clip rect (canonical sub_425650 propagates it to
+    // the target descriptor; the canonical blit writes only inside it). Our
+    // blit previously clipped to the full target, so AnimBitmap-drawn tiles
+    // (e.g. the isometric playfield) overflowed the gameplay viewport into
+    // the HUD/border bands and left stale "overlay" pixels. Mirror
+    // Graphics.drawImage's clip resolution.
+    const tw_i: i32 = @intCast(target.width);
+    const th_i: i32 = @intCast(target.height);
+    var cl = Clip{ .x0 = 0, .y0 = 0, .x1 = tw_i, .y1 = th_i };
+    if (vm.heap.get(graphics)) |g| {
+        const gcw: i32 = @bitCast(g.field_map.get(0xC1C1507A) orelse 0);
+        const gch: i32 = @bitCast(g.field_map.get(0xC1C1507B) orelse 0);
+        if (gcw != 0 and gch != 0) {
+            const gcx: i32 = @bitCast(g.field_map.get(0xC1C15078) orelse 0);
+            const gcy: i32 = @bitCast(g.field_map.get(0xC1C15079) orelse 0);
+            cl.x0 = @max(0, gcx);
+            cl.y0 = @max(0, gcy);
+            cl.x1 = @min(tw_i, gcx + gcw);
+            cl.y1 = @min(th_i, gcy + gch);
+            if (cl.x1 <= cl.x0 or cl.y1 <= cl.y0) return 0;
+        }
+    }
+
     const image_h = inst.field_map.get(FIELD_IMAGE) orelse 0;
     const nb_frame = inst.field_map.get(FIELD_FRAME_COUNT) orelse 0;
     if (image_h == 0 or nb_frame == 0) return 0;
@@ -286,6 +326,24 @@ fn draw(vm: *Vm, args: bridge.ArgFrame) i16 {
     const state_lo: u16 = @truncate(state);
     const img_w_half: i32 = @intCast(src_inst.pix_w / 2);
 
+    // Resolve the source image's transparent palette index (set via
+    // Image.setTransparentColor / setPaletteAlpha), gated on Graphics
+    // paint_mode==1 — same rule as Graphics.drawImage.
+    const tr_skip_idx: ?u8 = blk: {
+        const paint_mode = if (vm.heap.get(graphics)) |g|
+            (g.field_map.get(0x6f998aea) orelse 0) // FIELD_PAINT_MODE
+        else
+            @as(u32, 0);
+        if (paint_mode != 1) break :blk null;
+        const tr_mode = src_inst.field_map.get(0xC0FFEE03) orelse 0;
+        const tr_idx_raw: u32 = switch (tr_mode) {
+            48 => src_inst.field_map.get(0xC0FFEE01) orelse 0, // setTransparentColor
+            32, 80 => src_inst.field_map.get(0xC0FFEE02) orelse 0, // setPaletteAlpha
+            else => break :blk null,
+        };
+        break :blk @truncate(tr_idx_raw);
+    };
+
     // 3. Auxiliary + main blits — canonical's kernel-3 vs kernel-4 distinction:
     //   v15 & 2 && state & 1: aux kernel=4 (normal at +w/2), main kernel=3 (shadow at sx)
     //   v15 & 1 only:         aux kernel=3 (shadow at +w/2), main kernel=4 (normal at sx)
@@ -294,19 +352,30 @@ fn draw(vm: *Vm, args: bridge.ArgFrame) i16 {
     var main_kernel: u32 = 4;
     if ((state_lo & 2) != 0) {
         if ((state & 1) != 0) {
-            blit(target, src_inst, rect.sx + img_w_half, rect.sy, rect.sw, rect.sh, dx, dy, mode, 4);
+            blit(target, src_inst, rect.sx + img_w_half, rect.sy, rect.sw, rect.sh, dx, dy, mode, 4, tr_skip_idx, cl);
         }
         main_kernel = 3;
     } else if ((state_lo & 1) != 0) {
-        blit(target, src_inst, rect.sx + img_w_half, rect.sy, rect.sw, rect.sh, dx, dy, mode, 3);
+        blit(target, src_inst, rect.sx + img_w_half, rect.sy, rect.sw, rect.sh, dx, dy, mode, 3, tr_skip_idx, cl);
     }
 
     // 4. Main blit at (dx, dy) with the computed source rect.
-    blit(target, src_inst, rect.sx, rect.sy, rect.sw, rect.sh, dx, dy, mode, main_kernel);
+    blit(target, src_inst, rect.sx, rect.sy, rect.sw, rect.sh, dx, dy, mode, main_kernel, tr_skip_idx, cl);
     return 0;
 }
 
-pub const handle = bridge.canonical(.{
-    .{ 43, "AnimBitmap.draw",         draw },
-    .{ 45, "AnimBitmap.getRealFrame", getRealFrame },
-});
+/// Known names for idxs in this class's range that have NO Zig handler
+/// yet (they hit `defaultNativeStub` at runtime). Consumed by
+/// `natives/mod.zig::native_names` for logs/tools; idxs in range but
+/// absent here AND in `entries` render as "Class.?N". When porting one
+/// of these, move the row into `entries` with its handler.
+pub const stub_names = .{
+    .{ 44, "moduloFrame" },   // sub_4245FE
+};
+
+pub const entries = .{
+    .{ 43, "draw",         draw },
+    .{ 45, "getRealFrame", getRealFrame },
+};
+
+pub const handle = bridge.canonical(entries);

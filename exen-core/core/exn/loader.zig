@@ -59,12 +59,15 @@ pub const ImageState = struct {
     depth: u32 = 0,
     palette: ?[]u32 = null, // owned by caller
     pixels: ?[]u32 = null, // owned by caller — ABGR8888 raster
+    indices: ?[]u8 = null, // owned by caller — one source index per pixel
 
     pub fn deinit(self: *ImageState, allocator: std.mem.Allocator) void {
         if (self.palette) |p| allocator.free(p);
         if (self.pixels) |p| allocator.free(p);
+        if (self.indices) |p| allocator.free(p);
         self.palette = null;
         self.pixels = null;
+        self.indices = null;
     }
 };
 
@@ -109,9 +112,11 @@ pub fn decodeImageFromResource(
     }
     const off = sig_off orelse return false;
     const decoded = png.decodePngToAbgr(allocator, raw, off) catch return false;
-    // Free previous pixels if re-decoding.
+    // Free previous buffers if re-decoding.
     if (image.pixels) |p| allocator.free(p);
+    if (image.indices) |p| allocator.free(p);
     image.pixels = decoded.pixels;
+    image.indices = decoded.indices;
     image.width = decoded.width;
     image.height = decoded.height;
     return true;
@@ -138,7 +143,9 @@ pub fn decodeImageFromBytes(
     const off = sig_off orelse return false;
     const decoded = png.decodePngToAbgr(allocator, payload, off) catch return false;
     if (image.pixels) |p| allocator.free(p);
+    if (image.indices) |p| allocator.free(p);
     image.pixels = decoded.pixels;
+    image.indices = decoded.indices;
     image.width = decoded.width;
     image.height = decoded.height;
     return true;

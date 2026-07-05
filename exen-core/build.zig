@@ -72,21 +72,23 @@ pub fn build(b: *std.Build) void {
 
     // ── tools step ───────────────────────────────────────────────────────
     const tools_step = b.step("tools", "Build standalone CLI utilities (disasm, extract_*)");
-    inline for (.{ "disasm", "extract_pngs", "extract_strings" }) |name| {
+    inline for (.{ "disasm", "disasm_method", "scan_callers", "extract_pngs", "extract_strings" }) |name| {
         const exe = b.addExecutable(.{
             .name = name,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/" ++ name ++ ".zig"),
                 .target = target,
                 .optimize = optimize,
+                .imports = &.{.{ .name = "core", .module = core }},
             }),
         });
         const install = b.addInstallArtifact(exe, .{});
         tools_step.dependOn(&install.step);
     }
 
-    // Coverage audit needs access to the `core` module (registry +
-    // methodName table), so it goes through its own step. Run with:
+    // Coverage audit needs the `core` module (registry + methodName table +
+    // real opcode dispatch table) and the `natives` module (bound_natives —
+    // which native idxs have real handlers). Run with:
     //   zig build coverage -- samples/wallbreaker.exn [0xCLASSHASH]
     const coverage_exe = b.addExecutable(.{
         .name = "coverage_audit",
@@ -94,7 +96,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tools/coverage_audit.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "core", .module = core }},
+            .imports = &.{
+                .{ .name = "core", .module = core },
+                .{ .name = "natives", .module = natives },
+            },
         }),
     });
     const coverage_install = b.addInstallArtifact(coverage_exe, .{});
@@ -154,6 +159,14 @@ fn buildSdl3Frontend(
     core: *std.Build.Module,
     natives: *std.Build.Module,
 ) void {
+    // bios.zig lives in frontends/libretro/ (shared with the libretro core)
+    // but is outside the SDL module's path, so it gets its own module.
+    const bios = b.createModule(.{
+        .root_source_file = b.path("frontends/libretro/bios.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "exen-player",
         .root_module = b.createModule(.{
@@ -163,6 +176,7 @@ fn buildSdl3Frontend(
             .imports = &.{
                 .{ .name = "core", .module = core },
                 .{ .name = "natives", .module = natives },
+                .{ .name = "bios", .module = bios },
             },
         }),
     });

@@ -32,6 +32,7 @@ const bridge = core.bridge;
 const Vm = interp.Vm;
 const Handle = bridge.Handle;
 
+pub const class_name: []const u8 = "Sms";
 pub const first_index: u32 = 89;
 pub const last_index: u32 = 100;
 
@@ -78,17 +79,17 @@ fn setCursor(buf: []u8, v: u32) void {
 /// `buf` at `*cursor`, then advance `*cursor` by `n_bits`. Canonical
 /// uses MSB-first packing inside each byte (the `(8 - bit_off - n)`
 /// shift). Returns 1 on success (canonical signature).
-fn writeBits(buf: []u8, cursor: *u32, value: u32, n_bits: u5) i32 {
+fn writeBits(buf: []u8, cursor: *u32, value: u32, n_bits: u6) i32 {
     const start_bit = cursor.*;
     cursor.* = start_bit + @as(u32, n_bits);
     if (n_bits == 0) return 1;
-    var i: u5 = 0;
+    var i: u6 = 0;
     while (i < n_bits) : (i += 1) {
-        const bit_idx = start_bit + (n_bits - 1 - i); // MSB first
+        const bit_idx = start_bit + (@as(u32, n_bits) - 1 - i); // MSB first
         const byte_idx: usize = bit_idx / 8;
         const bit_in_byte: u3 = @intCast(7 - (bit_idx & 7));
         if (byte_idx >= buf.len) return -1;
-        const bit_val: u8 = @truncate((value >> i) & 1);
+        const bit_val: u8 = @truncate((value >> @intCast(i)) & 1);
         const mask: u8 = @as(u8, 1) << bit_in_byte;
         if (bit_val != 0) buf[byte_idx] |= mask else buf[byte_idx] &= ~mask;
     }
@@ -98,12 +99,12 @@ fn writeBits(buf: []u8, cursor: *u32, value: u32, n_bits: u5) i32 {
 /// Port of sub_412EA0 (ref:14983) — read `n_bits` from `buf` at
 /// `*cursor`, advance `*cursor` by `n_bits`, return the value (unsigned
 /// zero-extended). MSB-first packing matches `writeBits`.
-fn readBits(buf: []const u8, cursor: *u32, n_bits: u5) u32 {
+fn readBits(buf: []const u8, cursor: *u32, n_bits: u6) u32 {
     const start_bit = cursor.*;
     cursor.* = start_bit + @as(u32, n_bits);
     if (n_bits == 0) return 0;
     var v: u32 = 0;
-    var i: u5 = 0;
+    var i: u6 = 0;
     while (i < n_bits) : (i += 1) {
         const bit_idx = start_bit + i;
         const byte_idx: usize = bit_idx / 8;
@@ -294,9 +295,168 @@ fn endBlock(vm: *Vm, args: bridge.ArgFrame) i16 {
     return 1;
 }
 
-pub const handle = bridge.canonical(.{
-    .{ 89, "Sms.deleteSms",       deleteSms },
-    .{ 90, "Sms.createSms",       ctorOrReset },
-    .{ 92, "Sms.createBlock",     createBlock },
-    .{ 95, "Sms.endBlock",        endBlock },
-});
+/// Port of sub_421B7C (ref:23179) — read an 11-bit count: 3 high bits
+/// then 8 low bits, MSB-first. Inverse of `writeBlockCount`.
+fn readBlockCount(buf: []const u8, cursor: *u32) u32 {
+    const hi = readBits(buf, cursor, 3);
+    const lo = readBits(buf, cursor, 8);
+    return (hi << 8) | lo;
+}
+
+fn resetBlockScratch(vm: *Vm, this: Handle) void {
+    if (vm.heap.get(this)) |inst| {
+        inst.field_map.put(FIELD_BLOCK_START, 0) catch {};
+        inst.field_map.put(FIELD_BLOCK_ID, 0) catch {};
+        inst.field_map.put(FIELD_BLOCK_RES1, 0) catch {};
+        inst.field_map.put(FIELD_BLOCK_RES2, 0) catch {};
+    }
+}
+
+// ── [91] createSms(byte[]) — sub_42993B ─────────────────────────────────────
+// Load a received payload into the buffer and rewind for READING: copy
+// the arg byte[] into the payload region (S+4), cursor = 0. (Our buffer
+// is self-contained; canonical strips the 20-byte object header — we
+// take the byte[]'s `.bytes` slice directly.) Push 0.
+fn ctorFromBytes(vm: *Vm, args: bridge.ArgFrame) i16 {
+    const this = args.this();
+    const buf = smsBuffer(vm, this) orelse return 0;
+    @memset(buf, 0);
+    if (vm.heap.get(args.handle(1))) |src_inst| {
+        if (src_inst.bytes) |src| {
+            const cap = buf.len - SMS_PAYLOAD_OFF;
+            const n = @min(src.len, cap);
+            @memcpy(buf[SMS_PAYLOAD_OFF..][0..n], src[0..n]);
+        }
+    }
+    setCursor(buf, 0);
+    resetBlockScratch(vm, this);
+    return 0;
+}
+
+// ── [93] readBits(nbits) → int — sub_429AC0 ─────────────────────────────────
+fn readBitsNative(vm: *Vm, args: bridge.ArgFrame) i16 {
+    const this = args.this();
+    const buf = smsBuffer(vm, this) orelse {
+        args.setReturn(0);
+        return 1;
+    };
+    var nbits: u32 = args.getU32(1);
+    if (nbits > 32) nbits = 32;
+    var cur = cursorAt(buf);
+    const v = readBits(buf, &cur, @intCast(nbits));
+    setCursor(buf, cur);
+    args.setReturn(v);
+    return 1;
+}
+
+// ── [94] writeBits(value, nbits) — sub_429B0A ───────────────────────────────
+// Canonical clamps `if (nbits > 7) nbits = 8` — a single byte value per
+// call. Guarded by the write cap (cursor > 0x42D). Push 0 (void).
+fn writeBitsNative(vm: *Vm, args: bridge.ArgFrame) i16 {
+    const this = args.this();
+    const buf = smsBuffer(vm, this) orelse return 0;
+    var cur = cursorAt(buf);
+    if (cur > 0x42D) return 0;
+    const value = args.getU32(1);
+    var nbits: u32 = args.getU32(2);
+    if (nbits > 7) nbits = 8;
+    _ = writeBits(buf, &cur, value, @intCast(nbits));
+    setCursor(buf, cur);
+    return 0;
+}
+
+// ── [96] nextBlock() — sub_429C43 ───────────────────────────────────────────
+// Called after getIdBlock (cursor at the length slot): read the 11-bit
+// length, skip that many payload bits, reset block scratch. Push 0.
+fn nextBlock(vm: *Vm, args: bridge.ArgFrame) i16 {
+    const this = args.this();
+    const buf = smsBuffer(vm, this) orelse return 0;
+    var cur = cursorAt(buf);
+    if (cur > 0x42D) return 0;
+    const len = readBlockCount(buf, &cur);
+    setCursor(buf, cur + len);
+    resetBlockScratch(vm, this);
+    return 0;
+}
+
+// ── [97] getIdBlock() → int — sub_429CB0 ────────────────────────────────────
+// Read a received block's 8-bit id; −1 if past the read cap. Push 1.
+fn getIdBlock(vm: *Vm, args: bridge.ArgFrame) i16 {
+    const this = args.this();
+    const buf = smsBuffer(vm, this) orelse {
+        args.setReturnI32(-1);
+        return 1;
+    };
+    var cur = cursorAt(buf);
+    if (cur >= 0x460) {
+        args.setReturnI32(-1);
+        return 1;
+    }
+    if (vm.heap.get(this)) |inst| inst.field_map.put(FIELD_BLOCK_START, cur) catch {};
+    const id = readBits(buf, &cur, 8);
+    setCursor(buf, cur);
+    if (vm.heap.get(this)) |inst| inst.field_map.put(FIELD_BLOCK_ID, id) catch {};
+    args.setReturn(id);
+    return 1;
+}
+
+// ── [98] getLengthBlock() → int — sub_429D2A ────────────────────────────────
+fn getLengthBlock(vm: *Vm, args: bridge.ArgFrame) i16 {
+    const this = args.this();
+    const buf = smsBuffer(vm, this) orelse {
+        args.setReturn(0);
+        return 1;
+    };
+    var cur = cursorAt(buf);
+    if (cur > 0x42D) {
+        args.setReturn(0);
+        return 1;
+    }
+    const len = readBlockCount(buf, &cur);
+    setCursor(buf, cur);
+    if (vm.heap.get(this)) |inst| inst.field_map.put(FIELD_BLOCK_RES1, len) catch {};
+    args.setReturn(len);
+    return 1;
+}
+
+// ── [99] skipBits(nbits) — sub_429D86 ───────────────────────────────────────
+fn skipBits(vm: *Vm, args: bridge.ArgFrame) i16 {
+    const this = args.this();
+    const buf = smsBuffer(vm, this) orelse return 0;
+    const cur = cursorAt(buf);
+    const n = args.getU32(1);
+    if (n + cur <= 0x460) setCursor(buf, cur + n);
+    return 0;
+}
+
+/// Known names for idxs in this class's range that have NO Zig handler
+/// yet (they hit `defaultNativeStub` at runtime). Consumed by
+/// `natives/mod.zig::native_names` for logs/tools; idxs in range but
+/// absent here AND in `entries` render as "Class.?N". When porting one
+/// of these, move the row into `entries` with its handler.
+pub const stub_names = .{
+    // ⚠ behavioral name (no strings-region name for hash 0xb2ba469c).
+    // Canonical sub_429E0A: formats the per-slot 16.16 tariff
+    // (dword_45FE8C[7*slot+106]) via sub_422E57 as "X.YY ", appends the
+    // currency label at VMstate+360 ("Euro(s)"), allocates a String and
+    // returns it (push 1). Used by the shared vendor persistence class
+    // (method 0xd045f3c1 in Spyro/Crash) to build the "(0.31 Euro(s))\n"
+    // premium-SMS price-disclosure line.
+    .{ 100, "getPrice" },           // sub_429E0A
+};
+
+pub const entries = .{
+    .{ 89, "deleteSms",         deleteSms },
+    .{ 90, "createSms",         ctorOrReset },
+    .{ 91, "createSms(byte[])", ctorFromBytes },
+    .{ 92, "createBlock",       createBlock },
+    .{ 93, "readBits",          readBitsNative },
+    .{ 94, "writeBits",         writeBitsNative },
+    .{ 95, "endBlock",          endBlock },
+    .{ 96, "nextBlock",         nextBlock },
+    .{ 97, "getIdBlock",        getIdBlock },
+    .{ 98, "getLengthBlock",    getLengthBlock },
+    .{ 99, "skipBits",          skipBits },
+};
+
+pub const handle = bridge.canonical(entries);

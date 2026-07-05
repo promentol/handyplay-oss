@@ -41,6 +41,16 @@ pub fn opIconst(_: *Vm, frame: *Frame, op: u8) Error!void {
     try frame.push(@bitCast(value));
 }
 
+/// LCONST_0 / LCONST_1 (opcodes 0x09 / 0x0a, canonical sub_40CD4C /
+/// sub_40CD7B). Push a 2-slot long constant — lo first, then hi, per
+/// this VM's little-endian long layout (matches LDC2_W above and the
+/// LLOAD/LSTORE family). Values 0L and 1L both have hi == 0.
+pub fn opLconst(_: *Vm, frame: *Frame, op: u8) Error!void {
+    const lo: u32 = if (op == 0x0a) 1 else 0;
+    try frame.push(lo);
+    try frame.push(0);
+}
+
 pub fn opBipush(_: *Vm, frame: *Frame, _: u8) Error!void {
     const imm: i8 = @bitCast(frame.bytecode[frame.pc]);
     frame.pc += 1;

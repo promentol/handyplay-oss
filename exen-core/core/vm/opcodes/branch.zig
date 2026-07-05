@@ -27,6 +27,31 @@ pub fn opGoto(_: *Vm, frame: *Frame, _: u8) Error!void {
     frame.pc = target;
 }
 
+/// JSR (opcode 0xa8, canonical sub_40C8F0) — jump to subroutine.
+/// Canonical: save the return PC into the per-frame slot (VC+32), push 0,
+/// jump to the u16 target. The saved PC is the address *after* the u16
+/// operand. Unlike JVM (which pushes the return address), ExEn pushes a
+/// 0 placeholder and keeps the real return PC in the frame slot, so RET
+/// restores from there rather than from a local.
+///
+/// ⚠ Inferred from the opcodes.md decompile summary; reference/ref body
+/// unavailable. JSR/RET are unused by the current corpus (only old
+/// `finally`-clause compilation emits them).
+pub fn opJsr(_: *Vm, frame: *Frame, _: u8) Error!void {
+    const target = frame.readU16();
+    frame.jsr_ret_pc = frame.pc;
+    try frame.push(0);
+    frame.pc = target;
+}
+
+/// RET (opcode 0xa9, canonical sub_40F9E0) — return from subroutine.
+/// Canonical: PC = (VC+32), push 0. No operand (unlike JVM's `ret N`).
+/// See opJsr for the shared caveat.
+pub fn opRet(_: *Vm, frame: *Frame, _: u8) Error!void {
+    frame.pc = frame.jsr_ret_pc;
+    try frame.push(0);
+}
+
 pub fn icmpBranch(frame: *Frame, take_branch: bool) Error!void {
     const b = try frame.pop();
     const a = try frame.pop();

@@ -19,6 +19,7 @@ const _h = @import("../_helpers.zig");
 const Vm = interp.Vm;
 const Handle = bridge.Handle;
 
+pub const class_name: []const u8 = "Displayable";
 pub const first_index: u32 = 65;
 pub const last_index: u32 = 66;
 
@@ -117,7 +118,9 @@ fn unnamed_sub_424A9D(vm: *Vm, args: bridge.ArgFrame) i16 {
     return 0;
 }
 
-pub const handle = bridge.canonical(.{
-    .{ 65, "Displayable.haveDisplayableCommand", haveDisplayableCommand },
-    .{ 66, "Displayable.drawCommand",            unnamed_sub_424A9D },
-});
+pub const entries = .{
+    .{ 65, "haveDisplayableCommand", haveDisplayableCommand },
+    .{ 66, "drawText",               unnamed_sub_424A9D },
+};
+
+pub const handle = bridge.canonical(entries);

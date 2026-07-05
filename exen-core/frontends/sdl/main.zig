@@ -20,12 +20,13 @@ const exen = @import("core");
 const natives = @import("natives");
 const audio = @import("audio.zig");
 const haptic = @import("haptic.zig");
-const bios = @import("../libretro/bios.zig");
+const bios = @import("bios");
 
 // Required firmware (by MD5), user-supplied (set HANDYPLAY_BIOS) — not bundled.
 // Located + installed to the cwd paths exen.boot reads; missing = hard error.
 const BIOS_REQ = [_]bios.Req{
     .{ .md5 = "870bef21d6f269e3e3d91943c66de8e8", .dst = "assets/unk_4494F0.bin" },
+    .{ .md5 = "79fda67fa42bf40a12c94c0d7fc82f87", .dst = "assets/off_454498.bin" },
 };
 
 const c = @cImport({
@@ -93,6 +94,56 @@ const AutoKey = struct {
 var g_auto_keys: [8]AutoKey = [_]AutoKey{.{ .code = 0, .fire_at = 0 }} ** 8;
 var g_auto_keys_count: u32 = 0;
 var g_boot_ms: u64 = 0;
+// ── Catalog host (exen.setCatalogHost) ─────────────────────────────────────
+// launchGame: consult <flashDir>/catalog_games.ini (lines "id=path.exn");
+// a hit stashes the path for the main loop to apply at the tick boundary
+// (the native runs INSIDE exen.tick — swapping the gamelet immediately
+// would deinit the classes the VM is executing). editBox: request SDL
+// text input; the event loop collects chars until Return and delivers
+// via exen.catalogEditBoxResult.
+var g_launch_path_buf: [512]u8 = undefined;
+var g_launch_pending: ?[]const u8 = null;
+var g_editbox_active: bool = false;
+var g_editbox_max: u8 = 6;
+var g_editbox_buf: [16]u8 = undefined;
+var g_editbox_len: usize = 0;
+var g_editbox_started: bool = false;
+
+fn catalogLaunchGame(id: u16) bool {
+    var path_buf: [512]u8 = undefined;
+    const ini_path = std.fmt.bufPrint(&path_buf, "{s}catalog_games.ini", .{exen.flashDir()}) catch return false;
+    const f = std.fs.cwd().openFile(ini_path, .{}) catch {
+        std.debug.print("[catalog] no {s} — cannot map game id {d}\n", .{ ini_path, id });
+        return false;
+    };
+    defer f.close();
+    var data: [4096]u8 = undefined;
+    const n = f.readAll(&data) catch return false;
+    var it = std.mem.splitScalar(u8, data[0..n], '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key_id = std.fmt.parseInt(u16, std.mem.trim(u8, line[0..eq], " \t"), 10) catch continue;
+        if (key_id != id) continue;
+        const path = std.mem.trim(u8, line[eq + 1 ..], " \t");
+        if (path.len == 0 or path.len > g_launch_path_buf.len) return false;
+        @memcpy(g_launch_path_buf[0..path.len], path);
+        g_launch_pending = g_launch_path_buf[0..path.len];
+        std.debug.print("[catalog] launch id {d} → {s} (applied at tick boundary)\n", .{ id, path });
+        return true;
+    }
+    std.debug.print("[catalog] game id {d} not in catalog_games.ini\n", .{id});
+    return false;
+}
+
+fn catalogEditBox(prompt: []const u8, max_len: u8) void {
+    g_editbox_active = true;
+    g_editbox_max = @min(max_len, @as(u8, @intCast(g_editbox_buf.len)));
+    g_editbox_len = 0;
+    std.debug.print("[catalog] edit box open (prompt=\"{s}\", max {d} chars, type + Return)\n", .{ prompt, g_editbox_max });
+}
+
 // Scheduled framebuffer captures: --screenshot-at=NAME@MS,NAME2@MS2.
 // Fires once at the given elapsed ms, writes a BMP. Useful for headless
 // verification of gameplay rendering without manual key input.
@@ -254,9 +305,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Require BIOS: locate the firmware by MD5 in HANDYPLAY_BIOS (default ./bios)
-    // and install it; fail clearly if absent.
-    const bios_dir = std.posix.getenv("HANDYPLAY_BIOS") orelse "bios";
+    // Require BIOS: locate the firmware by MD5 in HANDYPLAY_BIOS (default ./assets,
+    // where the dev tree keeps the .bin firmware) and install it; fail clearly if absent.
+    const bios_dir = std.posix.getenv("HANDYPLAY_BIOS") orelse "assets";
     bios.install(allocator, bios_dir, &BIOS_REQ) catch |err| {
         std.debug.print("[bios] required firmware not found in '{s}' ({s}).\n" ++
             "  Set HANDYPLAY_BIOS to your firmware dir (needs simulator.ini + builtins by MD5).\n",
@@ -273,6 +324,8 @@ pub fn main() !void {
     // (which initialises the VM with a default stub) and BEFORE
     // loadExn (which triggers Bootstrap.init → NATIVE invocations).
     exen.setNativeDispatcher(&natives.dispatch);
+    exen.setNativeNames(&natives.native_names);
+    exen.setCatalogHost(.{ .launchGame = &catalogLaunchGame, .editBox = &catalogEditBox });
 
     // Pick the .exn path from argv[1], defaulting to TheTerminator.exn.
     // Persist it for the Device tray callback so a device swap can
@@ -329,6 +382,10 @@ pub fn main() !void {
                         else if (std.mem.eql(u8, key_str, "LEFT"))  exen.KEY_LEFT
                         else if (std.mem.eql(u8, key_str, "RIGHT")) exen.KEY_RIGHT
                         else if (std.mem.eql(u8, key_str, "FIRE"))  exen.KEY_FIRE
+                        else if (std.mem.eql(u8, key_str, "SOFT1")) exen.KEY_SOFT1
+                        else if (std.mem.eql(u8, key_str, "SOFT2")) exen.KEY_SOFT2
+                        // Single digit / '*' / '#' → raw J2ME key code (ASCII).
+                        else if (key_str.len == 1) @as(i32, key_str[0])
                         else 0;
                     const ms: u64 = std.fmt.parseInt(u64, ms_str, 10) catch 0;
                     if (g_auto_keys_count < g_auto_keys.len) {
@@ -502,8 +559,39 @@ pub fn main() !void {
         while (c.SDL_PollEvent(&event)) {
             switch (event.type) {
                 c.SDL_EVENT_QUIT => g_state.quit = true,
+                c.SDL_EVENT_TEXT_INPUT => {
+                    // Catalog edit box collecting characters.
+                    if (g_editbox_active) {
+                        const txt = std.mem.span(event.text.text);
+                        for (txt) |ch| {
+                            if (g_editbox_len < g_editbox_max) {
+                                g_editbox_buf[g_editbox_len] = ch;
+                                g_editbox_len += 1;
+                            }
+                        }
+                    }
+                },
                 c.SDL_EVENT_KEY_DOWN => {
-                    if (event.key.key == c.SDLK_ESCAPE) {
+                    if (g_editbox_active) {
+                        // Edit box swallows keys: Return commits, Backspace
+                        // deletes, Escape cancels (empty result).
+                        switch (event.key.key) {
+                            c.SDLK_RETURN, c.SDLK_KP_ENTER => {
+                                exen.catalogEditBoxResult(g_editbox_buf[0..g_editbox_len]);
+                                g_editbox_active = false;
+                                _ = c.SDL_StopTextInput(window);
+                            },
+                            c.SDLK_BACKSPACE => {
+                                if (g_editbox_len > 0) g_editbox_len -= 1;
+                            },
+                            c.SDLK_ESCAPE => {
+                                exen.catalogEditBoxResult(&.{});
+                                g_editbox_active = false;
+                                _ = c.SDL_StopTextInput(window);
+                            },
+                            else => {},
+                        }
+                    } else if (event.key.key == c.SDLK_ESCAPE) {
                         g_state.quit = true;
                     } else if (!event.key.repeat) {
                         // Drop SDL's host-OS key-repeat events (which fire at
@@ -525,6 +613,27 @@ pub fn main() !void {
                 },
                 else => {},
             }
+        }
+
+        // Catalog edit box opened by the native this tick — begin SDL
+        // text input (must happen on the loop side, not in the callback).
+        if (g_editbox_active and !g_editbox_started) {
+            _ = c.SDL_StartTextInput(window);
+            g_editbox_started = true;
+        } else if (!g_editbox_active) {
+            g_editbox_started = false;
+        }
+
+        // Service a pending catalog game launch (set by launchGameIfPresent
+        // — applied here so the swap happens at a tick boundary, mirroring
+        // canonical's pump-consumes-state-5 model).
+        if (g_launch_pending) |path| {
+            g_launch_pending = null;
+            std.debug.print("[catalog] loading {s}\n", .{path});
+            exen.loadExn(path) catch |err| {
+                std.debug.print("[catalog] loadExn({s}) failed: {s}\n", .{ path, @errorName(err) });
+            };
+            g_exn_path = path; // static buffer — stays valid for tray reloads
         }
 
         // Service a pending device switch (set by the Device tray

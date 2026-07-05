@@ -19,6 +19,7 @@ const bridge = core.bridge;
 const Vm = interp.Vm;
 const Handle = bridge.Handle;
 
+pub const class_name: []const u8 = "Gamelet";
 pub const first_index: u32 = 67;
 pub const last_index: u32 = 88;
 
@@ -175,6 +176,22 @@ fn stopTimer(_: *Vm, _: bridge.ArgFrame) i16 {
     return 0;
 }
 
+// ── [78] sendSms(sms) — sub_4250C7 ──────────────────────────────────────────
+// Canonical resolves the Sms object's native buffer, reads its message
+// index (field[13]/offset 52), gates on a configured destination +
+// billing throttle, transmits over TCP, and posts event 257 (send
+// result) → gamelet onSmsSent(bool). There is no SMS server here, so
+// this is the fallback: skip the gates/network and queue an immediate
+// send-success via core.smsSend — delivered to the gamelet's
+// onSmsSent(true) callback on the next tick (core/exen.zig tick drain).
+// That releases "Waiting for a reply…" screens. The message index (used
+// only for real-backend routing) isn't tracked on our self-contained
+// Sms buffer, so pass 0. Push 0 (canonical sub_4250C7 returns 0).
+fn sendSms(_: *Vm, _: bridge.ArgFrame) i16 {
+    core.smsSend(0);
+    return 0;
+}
+
 // ── [79] saveCtx(this, buf) — sub_425156 → sub_4153F8 ───────────────────────
 // Writes the gamelet's save buffer (byte[] handle, length at fields[0])
 // to the persisted EEPROM file. Up to 300 bytes (canonical cap).
@@ -322,7 +339,7 @@ fn getNickName(vm: *Vm, args: bridge.ArgFrame) i16 {
 // Calling with any other key returns null.
 //
 // Strings region row for `getVersionInfo` is present in our positional
-// native_names; matching arg/return shape (1 String → String) + canonical
+// the extracted name table; matching arg/return shape (1 String → String) + canonical
 // behavior (key-based lookup against a 2-entry table returning a value
 // String) confirms this is `getVersionInfo`.
 const FRAMEWORK_KEY: []const u8 = "FrameWork";
@@ -346,23 +363,29 @@ fn getVersionInfo(vm: *Vm, args: bridge.ArgFrame) i16 {
     return 1;
 }
 
-pub const handle = bridge.canonical(.{
-    .{ 67, "isColor",                 isColor },
-    .{ 68, "numColors",               numColors },
-    .{ 69, "getBitmapDepth",          getBitmapDepth },
-    .{ 70, "getScreenWidth",          getScreenWidth },
-    .{ 71, "getScreenHeight",         getScreenHeight },
-    .{ 72, "screenUpdate",            screenUpdate },
-    .{ 73, "exitVm",                  exitVm },
-    .{ 74, "throwInternalException",  throwInternalException },
-    .{ 75, "getTimerTickCount",       getTimerTickCount },
-    .{ 76, "startTimer",              startTimer },
-    .{ 77, "stopTimer",               stopTimer },
-    .{ 79, "saveCtx",                 saveCtx },
-    .{ 80, "loadCtx",                 loadCtx },
-    .{ 81, "playVibrator",            playVibrator },
-    .{ 82, "playMelody",              playMelody },
-    .{ 83, "stopMelody",              stopMelody },
-    .{ 84, "Gamelet.getNickName",     getNickName },
-    .{ 87, "Gamelet.getVersionInfo",  getVersionInfo },
-});
+// Gamelet 85/86/88 have no recovered names — they auto-render
+// "Gamelet.?N" via the per-class range default fill (no stub_names decl).
+
+pub const entries = .{
+    .{ 67, "isColor",                isColor },
+    .{ 78, "sendSms",                sendSms },
+    .{ 68, "numColors",              numColors },
+    .{ 69, "getBitmapDepth",         getBitmapDepth },
+    .{ 70, "getScreenWidth",         getScreenWidth },
+    .{ 71, "getScreenHeight",        getScreenHeight },
+    .{ 72, "screenUpdate",           screenUpdate },
+    .{ 73, "exitVm",                 exitVm },
+    .{ 74, "throwInternalException", throwInternalException },
+    .{ 75, "getTimerTickCount",      getTimerTickCount },
+    .{ 76, "startTimer",             startTimer },
+    .{ 77, "stopTimer",              stopTimer },
+    .{ 79, "saveCtx",                saveCtx },
+    .{ 80, "loadCtx",                loadCtx },
+    .{ 81, "playVibrator",           playVibrator },
+    .{ 82, "playMelody",             playMelody },
+    .{ 83, "stopMelody",             stopMelody },
+    .{ 84, "getNickName",            getNickName },
+    .{ 87, "getVersionInfo",         getVersionInfo },
+};
+
+pub const handle = bridge.canonical(entries);

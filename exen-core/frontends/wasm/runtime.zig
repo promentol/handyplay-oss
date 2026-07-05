@@ -28,6 +28,7 @@ export fn exn_boot() i32 {
         return -1;
     };
     exen.setNativeDispatcher(&natives.dispatch);
+    exen.setNativeNames(&natives.native_names);
     exen.loadExn("/game.exn") catch |e| {
         std.debug.print("[exn] loadExn error: {s}\n", .{@errorName(e)});
         return -2;

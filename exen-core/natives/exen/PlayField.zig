@@ -3,7 +3,7 @@
 //! Hash 0x7219d0b4. Tiled scrolling playfield.
 //!
 //! Field hashes (from docs/extracted/exen_PlayField.md + name CRCs in
-//! core/debug/names.zig):
+//! core/debug/names.zig fieldName):
 //!   background  (byte[])  0xa6f13e72   ← tile buffer payload
 //!   backgroundW (int)     0xd0427691   ← grid width in cells (row stride)
 //!   backgroundH (int)     0xd0429ee7   ← grid height in cells
@@ -26,6 +26,7 @@ const bridge = core.bridge;
 const Vm = interp.Vm;
 const Handle = bridge.Handle;
 
+pub const class_name: []const u8 = "PlayField";
 pub const first_index: u32 = 46;
 pub const last_index: u32 = 53;
 
@@ -426,13 +427,15 @@ fn unnamed_sub_428208(vm: *Vm, args: bridge.ArgFrame) i16 {
 // Canonical-exact dispatch: every native takes (vm, ArgFrame) and returns
 // push count (i16). The bridge propagates frame.slab[0..push] back to the
 // caller's operand stack — matches ref's `SP += 4 * sub_407A94(...)`.
-pub const handle = bridge.canonical(.{
-    .{ 46, "PlayField.fillCells",      fillCells },
-    .{ 47, "PlayField.moveTiles",      unnamed_sub_42712F },
-    .{ 48, "PlayField.draw",           draw },
-    .{ 49, "PlayField.setCellTile",    setCellTile },
-    .{ 50, "PlayField.getCellTile",    getCellTile },
-    .{ 51, "PlayField.addSprite",      unnamed_sub_427F95 },
-    .{ 52, "PlayField.removeSprite",   unnamed_sub_4280BD },
-    .{ 53, "PlayField.removeAllSprite", unnamed_sub_428208 },
-});
+pub const entries = .{
+    .{ 46, "fillCells",       fillCells },
+    .{ 47, "moveTiles",       unnamed_sub_42712F },
+    .{ 48, "draw",            draw },
+    .{ 49, "setCellTile",     setCellTile },
+    .{ 50, "getCellTile",     getCellTile },
+    .{ 51, "addSprite",       unnamed_sub_427F95 },
+    .{ 52, "removeSprite",    unnamed_sub_4280BD },
+    .{ 53, "removeAllSprite", unnamed_sub_428208 },
+};
+
+pub const handle = bridge.canonical(entries);

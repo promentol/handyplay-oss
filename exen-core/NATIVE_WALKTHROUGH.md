@@ -74,17 +74,17 @@ so it's safe to re-run any time.
 | 51 | `sub_427F95` |  |  |  |
 | 52 | `sub_4280BD` |  |  |  |
 | 53 | `sub_428208` |  |  |  |
-| 54 | `sub_4248B0` |  |  |  |
-| 55 | `sub_4248C2` |  |  |  |
-| 56 | `sub_4248CA` |  |  |  |
-| 57 | `sub_4248D2` |  |  |  |
-| 58 | `sub_4248DA` |  |  |  |
-| 59 | `sub_4248EC` |  |  |  |
-| 60 | `sub_4248FE` |  |  |  |
-| 61 | `sub_424906` |  |  |  |
-| 62 | `sub_42490E` |  |  |  |
-| 63 | `sub_424916` |  |  |  |
-| 64 | `sub_42492A` |  |  |  |
+| 54 | `sub_4248B0` | exen.AnimFlash.initAnimFlash(...) → int (hash=0x871a673c, argc=1) | natives/exen/AnimFlash.zig::initAnimFlash | canonical sub_4248B0: `*a1 = 0; return 1` — pushes constant 0. ✓ verified + implemented (literal) |
+| 55 | `sub_4248C2` | exen.AnimFlash.draw(gfx, ?) → void (hash=0x4588a6fc, argc=2) | natives/exen/AnimFlash.zig::draw | canonical sub_4248C2 is EMPTY — void no-op; playback lives in the class's bytecode methods. Fixes the stub's +1 SP drift per call. ✓ verified + implemented (literal) |
+| 56 | `sub_4248CA` | exen.AnimFlash.delete() → void (hash=0x3f5289a5, argc=0) | natives/exen/AnimFlash.zig::delete | canonical sub_4248CA empty. ✓ verified + implemented (literal) |
+| 57 | `sub_4248D2` | exen.AnimFlash.setFrame(int) → void (hash=0x305ad830, argc=1) | natives/exen/AnimFlash.zig::setFrame | canonical sub_4248D2 empty. ✓ verified + implemented (literal) |
+| 58 | `sub_4248DA` | exen.AnimFlash.getNbFrames() → int (hash=0xd7243512, argc=0) | natives/exen/AnimFlash.zig::getNbFrames | canonical sub_4248DA: `*a1 = 1; return 1` — constant 1. ✓ verified + implemented (literal) |
+| 59 | `sub_4248EC` | exen.AnimFlash.getNbLoops() → int (hash=0xd724f5c4, argc=0) | natives/exen/AnimFlash.zig::getNbLoops | canonical sub_4248EC: `*a1 = 0; return 1`. ✓ verified + implemented (literal) |
+| 60 | `sub_4248FE` | exen.AnimFlash.setPosition(x, y) → void (hash=0xbc1d8740, argc=2) | natives/exen/AnimFlash.zig::setPosition | canonical sub_4248FE empty. ✓ verified + implemented (literal) |
+| 61 | `sub_424906` | exen.AnimFlash.setSize(w, h) → void (hash=0xbc1d31ef, argc=2) | natives/exen/AnimFlash.zig::setSize | canonical sub_424906 empty. ✓ verified + implemented (literal) |
+| 62 | `sub_42490E` | exen.AnimFlash.getRawFrames(...) → void (hash=0x3526a6fc, argc=5) | natives/exen/AnimFlash.zig::getRawFrames | canonical sub_42490E is EMPTY and VOID despite argc=5 — the stub's pushed 0 was pure SP drift (Spyro ×7 sites, IFRacing2 ×13). ✓ verified + implemented (literal) |
+| 63 | `sub_424916` | exen.AnimFlash.getWidth() → int (hash=0xd82c89f7, argc=1) | natives/exen/AnimFlash.zig::getWidth | canonical sub_424916: `*a1 = *(this+36)` — field slot 3 = 0xd0426be6. ✓ verified + implemented |
+| 64 | `sub_42492A` | exen.AnimFlash.getHeight() → int (hash=0xd82c5f6d, argc=1) | natives/exen/AnimFlash.zig::getHeight | canonical sub_42492A: `*a1 = *(this+40)` — field slot 4 = 0xd0425e87. ✓ verified + implemented |
 | 65 | `sub_424A60` | exen.Displayable.haveDisplayableCommand() → bool (hash=0xf53edf41, native final instance, argc=0) | natives/exen/Displayable.zig::haveDisplayableCommand | canonical (ref:24764): `if (sub_403F56(0) \|\| sub_403F56(1)) *a1 = 1; else *a1 = 0; return 1;`. `sub_403F56(0)=2` and `sub_403F56(1)=1` — both truthy, so OR short-circuits to `*a1 = 1` always. Strings region row 25 `haveDisplayableCommand: () → bool` matches (only argc=0 → bool candidate). Our Zig: `fn haveDisplayableCommand() i32 { return 1; }` — exact constant match. ✓ verified + implemented |
 | 66 | `sub_424A9D` | exen.Displayable.<unverified name> (class=0x02255f70, method=0x857f21f9, argc=3: Graphics, char[], int mode) | natives/exen/Displayable.zig::unnamed_sub_424A9D | canonical (ref:24779): saves graphics-state clip slots [6..9], overrides to full-screen (0,0,screen_w,screen_h), calls `sub_4238F0(text+1, *text_uint16_len, gfx_desc, mode)`, restores clip, returns 0. `sub_4238F0` remaps mode via `sub_403F56`: 0→CENTER, 1→LEFT, ≥2→DON'T_DRAW; positions text at clip-bottom (`clip_h - font_h`). Our Zig mirrors alignment-based positioning via `core.text.drawString`; clip save/restore is a no-op (drawString doesn't enforce clip — task #140). Strings region `drawCommand` row is argc=1 mismatch, so bound as `unnamed_sub_424A9D` pending (class, method-hash) → name link recovery. ✓ ported, name pending |
 | 67 | `sub_424F70` | exen.Gamelet.isColor() → bool (hash=0xf53ebe5a, static native) | natives/exen/Gamelet.zig::isColor | canonical: `*a1 = sub_4022DE() = (sub_4022BA() != 1) = (8 != 1) = 1`. Our impl derives from `device_bitmap_depth` constant. Part of Display-capability quintet idx 67..71. ✓ verified |
@@ -98,7 +98,7 @@ so it's safe to re-run any time.
 | 75 | `sub_425090` | exen.Gamelet.getTimerTickCount() → int (hash=0xd7241463, native instance, argc=0) | natives/exen/Gamelet.zig::getTimerTickCount | canonical (ref:25046): `*a1 = sub_406872(); return 1;` — `sub_406872` returns `sub_435D3F()` which is `GetTickCount() - sub_43F5A0()` (Win32 ms-since-boot minus VM startup origin). Returns u32 milliseconds since gamelet started. Pikubi hammers this ~230×/session for animation timing. Our impl uses `std.time.milliTimestamp()` minus a lazy-initialised origin — bit-equivalent for the consumer (monotonic u32 ms-since-start). ✓ verified canonical-faithful |
 | 76 | `sub_4250A3` | exen.Gamelet.startTimer(int period_ms) → void (hash=0x305a3e02, native instance, argc=1) | natives/exen/Gamelet.zig::startTimer | canonical: `sub_406851(arg[0])` → `sub_435D00(period_ms)` (Win32 SetTimer wrapper). Schedules the gamelet's per-tick callback at the given period. Our impl stores `period_ms` into `core.g_timer_period_ms`; the SDL frontend uses this to drive its tick rate. Strings region row 53 confirms argc=1 (int) → void. ✓ verified |
 | 77 | `sub_4250BA` | exen.Gamelet.stopTimer() → void (hash=0x3f5219b9, native public, argc=0) | natives/exen/Gamelet.zig::stopTimer | canonical (ref:25115): `sub_406868(); return 0;` where sub_406868 → sub_435DDE = Win32 KillTimer wrapper. Strings region row 54 `stopTimer: () → void` matches (argc=0 void). Our Zig: `core.g_timer_period_ms = 0;` — clears the SDL frame-pacer period, the equivalent of clearing the Win32 timer. ✓ verified + implemented |
-| 78 | `sub_4250C7` |  |  |  |
+| 78 | `sub_4250C7` | exen.Gamelet.sendSms(sms) → void (hash=0xea228a2e, native, argc=1) | natives/exen/Gamelet.zig::sendSms | canonical sub_4250C7 gates on destination+billing then TCP-sends + posts event 257. No server here → fallback: core.smsSend queues send-success, delivered next tick via onSmsSent(true). Releases send-gated waits. ✓ fallback implemented (Tier 1) |
 | 79 | `sub_425156` | exen.Gamelet.saveCtx(byte[] buf) → void (hash=0x6f6c1196, native instance, argc=1) | natives/exen/Gamelet.zig::saveCtx | canonical: validates byte[] non-null (else throws); calls `sub_4153F8(buf+20, length)` which caps at 300B, memcpy's FROM buf INTO device save area. Helper has embedded debug string `"exOnSaveCtx"` — direct name evidence. Symmetric pair to loadCtx (idx 80, `"exOnLoadCtx"`). Our impl: `core.eepromSave(bytes)` persists to `flash/eeprom.dat`. Strings region row 56 confirms argc=1 (byte[]) → void. ✓ verified |
 | 80 | `sub_4251D4` | exen.Gamelet.loadCtx(byte[] buf) → void (hash=0x6f6c1c2e, native instance, argc=1) | natives/exen/Gamelet.zig::loadCtx | canonical: validates byte[] non-null (else throws); calls `sub_41547B(buf+20, length)` which caps at 300B, checks save-present sentinel, and memcpy's from device save area at `*(*(dword_45FF3C+20)+4)+60` into buffer. Our impl calls `core.eepromLoad(bytes)` to read from `flash/eeprom.dat` directly, mirrors into `inst.fields[1..]` for BALOAD parity. Strings region row 57 confirms: argc=1 byte[] → void. Trace string `aExonloadctx`="exOnLoadCtx" in canonical body confirms identity. ✓ verified |
 | 81 | `sub_4253BC` |  |  |  |
@@ -111,24 +111,24 @@ so it's safe to re-run any time.
 | 88 | `sub_42563E` |  |  |  |
 | 89 | `sub_429A18` |  |  |  |
 | 90 | `sub_4298C8` |  |  |  |
-| 91 | `sub_42993B` |  |  |  |
+| 91 | `sub_42993B` | exen.Sms.createSms(byte[]) → void (hash=0x6f6cea09, native, argc=1) | natives/exen/Sms.zig::ctorFromBytes | canonical sub_42993B: load a received 136-byte payload into the buffer, cursor=0 (read mode). ✓ implemented |
 | 92 | `sub_429A20` |  |  |  |
-| 93 | `sub_429AC0` |  |  |  |
-| 94 | `sub_429B0A` |  |  |  |
+| 93 | `sub_429AC0` | exen.Sms.readBits(nbits) → int (hash=0x66ffc4af, native, argc=1) | natives/exen/Sms.zig::readBitsNative | canonical sub_429AC0 → sub_412EA0 MSB-first bit read, ≤32 bits, advance cursor. ✓ implemented |
+| 94 | `sub_429B0A` | exen.Sms.writeBits(value, nbits) → void (hash=0x7c081dfe, native, argc=2) | natives/exen/Sms.zig::writeBitsNative | canonical sub_429B0A → sub_413071 MSB-first write; clamps nbits≤8; guarded cursor≤0x42D. ✓ implemented |
 | 95 | `sub_429B8D` |  |  |  |
-| 96 | `sub_429C43` |  |  |  |
-| 97 | `sub_429CB0` |  |  |  |
-| 98 | `sub_429D2A` |  |  |  |
-| 99 | `sub_429D86` |  |  |  |
+| 96 | `sub_429C43` | exen.Sms.nextBlock() → void (hash=0x3f52dee2, native, argc=0) | natives/exen/Sms.zig::nextBlock | canonical sub_429C43: read 11-bit block length, skip payload, reset scratch. ✓ implemented |
+| 97 | `sub_429CB0` | exen.Sms.getIdBlock() → int (hash=0xd7244d63, native, argc=0) | natives/exen/Sms.zig::getIdBlock | canonical sub_429CB0: read 8-bit block id (−1 past read cap). ✓ implemented |
+| 98 | `sub_429D2A` | exen.Sms.getLengthBlock() → int (hash=0xd7247e90, native, argc=0) | natives/exen/Sms.zig::getLengthBlock | canonical sub_429D2A: read 11-bit block length (3+8). ✓ implemented |
+| 99 | `sub_429D86` | exen.Sms.skipBits(nbits) → void (hash=0x305a7b39, native, argc=1) | natives/exen/Sms.zig::skipBits | canonical sub_429D86: advance cursor by nbits (guarded ≤0x460). ✓ implemented |
 | 100 | `sub_429E0A` |  |  |  |
 | 101 | `sub_424940` |  |  |  |
 | 102 | `sub_42497C` |  |  |  |
 | 103 | `sub_424B70` | exen.FX.doRotozoomImage(image, graphics, x, y, angle, scale) → void (hash=0x2d3e3675, static native, argc=6) | natives/exen/FX.zig::doRotozoomImage | canonical (ref:24813): `v2 = sub_426785(graphics+24)`; `v3 = sub_426785(*(DWORD*)(image+24))`; null-check both (else `sub_434771("FX.doRotaZoom: image pointer might be null")` + non-catchable abort); dispatch into device-graphics vtable slot `*(v2[10]+64)(v2, v3, x, y, angle, scale)` — per-depth rotozoom kernel. Our Zig mirrors that math directly: identity fast-path when angle=0 ∧ scale=256 (centred blit), otherwise inverse-transform sample within a bounding box of `±max(src_w,src_h)*scale/256` around (x,y), using `std.math.sin/cos` with 8-bit angle convention (256 = full turn) and 256 = 1.0 fixed-point scale. Source palette is lazily decoded via `doTransformToSystemPalette`. Wallbreaker invokes ~32×/run for the ball trail + brick-burst FX. ✓ verified + implemented |
-| 104 | `sub_424BFD` |  |  |  |
-| 105 | `sub_424C84` |  |  |  |
-| 106 | `sub_424D62` |  |  |  |
-| 107 | `sub_424E40` |  |  |  |
-| 108 | `sub_424ED2` |  |  |  |
+| 104 | `sub_424BFD` | exen.FX.doMosaic(image, graphics, x, y, step) → void (hash=0xb29f3baa, static native, argc=5) | natives/exen/FX.zig::doMosaic | canonical sub_424BFD → 8-bit kernel sub_415FC6 (fxtab[1]): pixelation via downsample-then-replicate; gate step>=16 (16 = 1:1, block = step/16); 65536/step accumulators, index=acc>>12. Our port samples decoded ABGR instead of palette bytes; plain accumulator (canonical adds a periodic rounding jump). ✓ verified + implemented |
+| 105 | `sub_424C84` | exen.FX.doShiftHorizontal(image, graphics, x, y, shiftTable) → void (hash=0xfe4fe802, static native, argc=5) | natives/exen/FX.zig::doShiftHorizontal | canonical sub_424C84 → kernel sub_41688D (fxtab[4]): per-ROW displacement = x + table[row] (signed byte from table object: count u16@+18, data@+20), clipped row copy. ⚠ table element width byte-wise per kernel char*; an unrelated consumer reads dword-wise — verify against a producing gamelet. ✓ structure verified + implemented |
+| 106 | `sub_424D62` | exen.FX.doShiftVertical(image, graphics, x, y, shiftTable) → void (hash=0xfe4fdabe, static native, argc=5) | natives/exen/FX.zig::doShiftVertical | canonical sub_424D62 → kernel sub_416B75 (fxtab[5]): per-COLUMN displacement = y + table[col], clipped column copy. Same shift-table caveat as idx 105. ✓ structure verified + implemented |
+| 107 | `sub_424E40` | exen.FX.doVerticalShutter(image, graphics, phase, dir) → void (hash=0xa845a8fd, static native, argc=4) | natives/exen/FX.zig::doVerticalShutter | canonical sub_424E40 → kernel sub_4162D0 (fxtab[2]): width/8 bands of 8 columns; per-band blind-open 0..8 via sub_4165F5 `(9*clamp(cos(phase),0))>>16`, phase −64/band (dir=1; dir=0 window ⚠ approximated +512 offset). Verified firing ×7 in Spyro. ✓ verified + implemented |
+| 108 | `sub_424ED2` | exen.FX.doHorizontalShutter(image, graphics, phase, dir) → void (hash=0xa845d499, static native, argc=4) | natives/exen/FX.zig::doHorizontalShutter | canonical sub_424ED2 → kernel sub_416715 (fxtab[3]): height/8 bands of 8 rows, row-memcpy per open row, same blind table as idx 107. (Strings-region name doHorizontalShutter — old positional guess doShutterHorizontal was wrong.) ✓ verified + implemented |
 | 109 | `sub_426870` |  |  |  |
 | 110 | `sub_426990` |  |  |  |
 | 111 | `sub_4269AC` |  |  |  |
@@ -143,30 +143,30 @@ so it's safe to re-run any time.
 | 120 | `sub_426AB4` | exen.Math.setRandSeed(int seed) → void (hash=0x305a2eee, static native, argc=1) | natives/exen/Math.zig::setRandSeed | canonical: `sub_41CD3D(*a1); return 0;` — call PRNG seed setter. Our impl stores seed into `Rng.state_a` and resets `Rng.state_b`. ✓ verified (rock-solid: full sig records, positional pairing locked across all 13 Math natives) |
 | 121 | `sub_426ACA` | exen.Math.random() → int (hash=0xd7246024, static native, argc=0) | natives/exen/Math.zig::random | canonical: `*a1 = sub_41CD5D(); return 1;` — pair-state PRNG generator. Our impl: rotate state_a by (state_b & 0x1F), mix into state_b, add 31009 — direct port of canonical sub_41CD5D. ✓ verified |
 | 122 | `sub_426ADD` |  |  |  |
-| 123 | `sub_426B20` |  |  |  |
-| 124 | `sub_426B89` |  |  |  |
-| 125 | `sub_426BE3` |  |  |  |
-| 126 | `sub_426C3D` |  |  |  |
-| 127 | `sub_426C97` |  |  |  |
-| 128 | `sub_426D7B` |  |  |  |
+| 123 | `sub_426B20` | exen.Matrix3D.copyFrom(Matrix3D src) → void (hash=0x46ca2f89, native, argc=1) | natives/exen/Matrix3D.zig::copyFrom | canonical sub_426B20 → sub_41D47C: copy 16 ints from src.element to this.element (null src → zero-fill). Storage: int[16] Q16.16 row-major in field 0x1822f276 (verified from builtin <init> bytecode). ✓ verified + implemented |
+| 124 | `sub_426B89` | exen.Matrix3D.rotX(int angle) → void (hash=0x305a66f1, native, argc=1) | natives/exen/Matrix3D.zig::rotX | canonical sub_426B89 → sub_41D25B: OVERWRITE this with X-rotation ([5]=c,[6]=s,[9]=−s,[10]=c, [0]=[15]=1); angle on the 2048-step circle, cos=sub_41C972/sin=sub_41C956 Q16 (float-approximated like exen.Math). ✓ verified + implemented |
+| 125 | `sub_426BE3` | exen.Matrix3D.rotY(int angle) → void (hash=0x305a7778, native, argc=1) | natives/exen/Matrix3D.zig::rotY | canonical sub_426BE3 → sub_41D2C4: [0]=c,[2]=−s,[8]=s,[10]=c, [5]=[15]=1. ✓ verified + implemented |
+| 126 | `sub_426C3D` | exen.Matrix3D.rotZ(int angle) → void (hash=0x305a45e3, native, argc=1) | natives/exen/Matrix3D.zig::rotZ | canonical sub_426C3D → sub_41D32E: [0]=c,[1]=s,[4]=−s,[5]=c, [10]=[15]=1. ✓ verified + implemented |
+| 127 | `sub_426C97` | exen.Matrix3D.multiply(Matrix3D other) → void (hash=0x6512b8f5, native, argc=1) ⚠ name inferred | natives/exen/Matrix3D.zig::multiply | canonical sub_426C97 → sub_41D396: 4×4 matmul with (a>>8)*(b>>8) products, result onto this. ✓ body verified, name inferred |
+| 128 | `sub_426D7B` | exen.Matrix3D.transform(Vector3D src, Vector3D dst) → void (hash=0x2b45b8f5, native, argc=2) ⚠ name inferred | natives/exen/Matrix3D.zig::transform | canonical sub_426D7B → sub_41D17B: row·vector (>>8 products) of this × src.{x,y,z} into dst components. ✓ body verified, name inferred |
 | 129 | `sub_42A020` | exen.Vector3D.squareLength() → int (hash=0xd72430ea, native public, argc=0) | natives/exen/Vector3D.zig::squareLength | canonical (ref:28091): `v3 = { this.x, this.y, this.z }; *a1 = sub_41CEB4(v3); return 1;` where `sub_41CEB4 = (z>>8)² + (y>>8)² + (x>>8)²`. Strings region row 2 `squareLength: () → int` matches. Our Zig: reads x/y/z from instance field_map (hashes 0xd042f048/0xd042e1c1/0xd042d35a) and computes the same shifted-byte squared sum. ✓ verified + implemented (companion to idx 130 length, which wraps this in `sub_41CE03 << 8`). |
 | 130 | `sub_42A074` | exen.Vector3D.length() → int (hash=0xd724ffd6, native public, argc=0) | natives/exen/Vector3D.zig::length | canonical (ref:28108): copies x/y/z from this.field[6..8] into local `v3[3]`, calls `sub_41CEFA(v3)` = `sub_41CE03(x²+y²+z²) << 8` (fixed-point sqrt of sum of squares); clamps `-5` overflow to `-1`. Adjacent: idx 129 sub_42A020 = `squareLength` (same code, calls sub_41CEB4 instead — no sqrt). Pikubi calls this ~10×/game. ✓ verified + implemented (port includes canonical isqrt + squareLengthRaw helpers; triple cross-check: class hash 0xe36f9667 → Vector3D in extracted_table.md; method_table row 4 argc=0 → strings region row 3 "length"; canonical body computes sqrt). |
-| 131 | `sub_42A0C8` |  |  |  |
-| 132 | `sub_42A132` |  |  |  |
-| 133 | `sub_42A1AD` |  |  |  |
-| 134 | `sub_42A228` |  |  |  |
-| 135 | `sub_42A28A` |  |  |  |
-| 136 | `sub_42A305` |  |  |  |
-| 137 | `sub_4284C9` |  |  |  |
-| 138 | `sub_428683` |  |  |  |
-| 139 | `sub_4286C9` |  |  |  |
-| 140 | `sub_428716` |  |  |  |
-| 141 | `sub_42874B` |  |  |  |
-| 142 | `sub_42877A` |  |  |  |
-| 143 | `sub_4287BE` |  |  |  |
-| 144 | `sub_4288D3` |  |  |  |
-| 145 | `sub_428910` |  |  |  |
-| 146 | `sub_428962` |  |  |  |
+| 131 | `sub_42A0C8` | exen.Vector3D.normalise() → int (hash=0xd724a1ce, native, argc=0) | natives/exen/Vector3D.zig::normalise | canonical sub_42A0C8 → sub_41CF17 normalize-in-place, status pushed (-5→-1 overflow clamp). ⚠ helper rounding approximated with i64 comp*0x10000/len. ✓ structure verified + implemented |
+| 132 | `sub_42A132` | exen.Vector3D.sum(Vector3D other) → void (hash=0x9cd66010, native, argc=1) | natives/exen/Vector3D.zig::sum | canonical sub_42A132 → sub_41CFC7 componentwise add into this. ✓ verified + implemented |
+| 133 | `sub_42A1AD` | exen.Vector3D.minus(Vector3D other) → void (hash=0x9cd657fe, native, argc=1) | natives/exen/Vector3D.zig::minus | canonical sub_42A1AD → sub_41D004 this−other into this. ✓ verified + implemented |
+| 134 | `sub_42A228` | exen.Vector3D.dot(Vector3D other) → int (hash=0x74a08c21, native, argc=1) | natives/exen/Vector3D.zig::dot | canonical sub_42A228 → sub_41D041 Σ(a>>8)*(b>>8), pushes 1. ✓ verified + implemented |
+| 135 | `sub_42A28A` | exen.Vector3D.crossProduct(Vector3D other) → void (hash=0x9cd6a7a1, native, argc=1) | natives/exen/Vector3D.zig::crossProduct | canonical sub_42A28A → sub_41D090 cross product (>>8 products) into this. ✓ verified + implemented |
+| 136 | `sub_42A305` | exen.Vector3D.multiply(int scalar) → void (hash=0x305a2351, native, argc=1) ⚠ name inferred | natives/exen/Vector3D.zig::multiplyScalar | canonical sub_42A305 → sub_41D12B: each comp = (comp>>8)*(scalar>>8). ✓ body verified, name inferred |
+| 137 | `sub_4284C9` | exen.RayCast.draw(graphics, x, y, angle) → void (hash=0x6b07a6fc, argc=4) | natives/exen/RayCast.zig::draw | canonical sub_4284C9 → sub_41F4DB: cast W/detail DDA rays → wall strips (h=projDist·wallScale/dist on horizon) → depth-sorted sprites w/ per-column occlusion. Renders into ABGR DrawTarget sampling decoded textures. ⚠ per-wall shade byte + sprite image-B blend simplified; DDA sign conventions visually verified not byte-stepped. ✓ structure verified + implemented |
+| 138 | `sub_428683` | exen.RayCast.isThereAWall(x, y) → boolean (hash=0x546b12ea, argc=2) | natives/exen/RayCast.zig::isThereAWall | canonical sub_428683 → sub_41F5B9: cell=(coord>>16)/64; true if any of 4 surrounding half-edge nibbles is 0 (walkability). ✓ verified + implemented |
+| 139 | `sub_4286C9` | exen.RayCast.addMonster(id, w, h) → int (hash=0x625c3542, argc=3) | natives/exen/RayCast.zig::addMonster | canonical sub_4286C9 → sub_42022A: activate record ([0]=1, [4]=[8]=w, [5]=[9]=h, clear rects/tex). ⚠ push value inferred (1/0). ✓ structure verified + implemented |
+| 140 | `sub_428716` | exen.RayCast.findFirstSpriteFreeID() → int (hash=0xd724dc6a, argc=0) | natives/exen/RayCast.zig::findFirstSpriteFreeID | canonical sub_428716 → sub_4201BF: first record with [0]==0, else −1. ✓ verified + implemented |
+| 141 | `sub_42874B` | exen.RayCast.removeSprite(id) → void (hash=0x305a9e99, argc=1) | natives/exen/RayCast.zig::removeSprite | canonical sub_42874B → sub_4202C9: [0]=0. ✓ verified + implemented |
+| 142 | `sub_42877A` | exen.RayCast.moveSprite(id, x, y, z) → void (hash=0xcf20d2c7, argc=4) | natives/exen/RayCast.zig::moveSprite | canonical sub_42877A → sub_420511: record [1..3]=x,y,z. MutantAlert ×14/frame. ✓ verified + implemented |
+| 143 | `sub_4287BE` | exen.RayCast.setSpritePos(id, ax, ay, w, h, bx, by) → void (hash=0xc342e202, argc=7) | natives/exen/RayCast.zig::setSpritePos | canonical sub_4287BE → sub_420302: refresh tex slots from A/B Image[], validate both src rects vs image dims, write [6..11]. ✓ verified + implemented |
+| 144 | `sub_4288D3` | exen.RayCast.setSpriteSize(id, w, h) → void (hash=0x8a2a3357, argc=3) | natives/exen/RayCast.zig::setSpriteSize | canonical sub_4288D3 → sub_420412: [4..5]=w,h (both >0). ✓ verified + implemented |
+| 145 | `sub_428910` | exen.RayCast.changeInternalValues(w, h, wallScale, detail, yOff, mapDim) → void (hash=0x88e671af, argc=6) | natives/exen/RayCast.zig::changeInternalValues | canonical sub_428910 → sub_41F0DA: derived config (ray count, angle constants 6·W/circle, projection-plane dist = halfW/tan(halfFOV), horizon). ✓ verified + implemented |
+| 146 | `sub_428962` | exen.RayCast.castRay(x, y, angle, int[≥6] out) → boolean (hash=0x729e78f8, argc=4) | natives/exen/RayCast.zig::castRay | canonical sub_428962: single DDA ray at explicit angle → out{hitX,hitY,rawDist,corrDist,texId,texX}, push 1. ✓ structure verified + implemented |
 | 147 | `sub_429F40` |  |  |  |
 | 148 | `sub_429FB2` |  |  |  |
 | 149 | `sub_429FBA` |  |  |  |
@@ -195,13 +195,13 @@ so it's safe to re-run any time.
 | 172 | `sub_42B1ED` |  |  |  |
 | 173 | `sub_42B244` |  |  |  |
 | 174 | `sub_42AE4E` | java.lang.StringBuffer.toString() → String (hash=0xb2ba3939, native public, argc=0) | natives/java/lang/StringBuffer.zig::toStringOp | canonical (ref:28702): `v4 = sub_410067(153, 0x7772DDE3); v3 = sub_411ADD(this.value); if (v3) { ++refcount; new_string.value = v3; } else { sub_411B5E(v4); v4=0; throw OOM; } *a1 = v4; return 1;` — allocate new String, duplicate this.value (only the populated LENGTH bytes), return String handle. Strings region row 10 `toString` (no sig but argc=0→ref native matches). Our Zig: allocs String, copies `inst.bytes[0..inst.fields[0]]` (length-bounded), returns new handle. Post-refactor uses fields[0] for length, NOT bytes.len. ✓ verified + implemented |
-| 175 | `sub_42B2A0` |  |  |  |
-| 176 | `sub_42B2AD` |  |  |  |
-| 177 | `sub_42B338` |  |  |  |
-| 178 | `sub_4240A0` |  |  |  |
-| 179 | `sub_4240E1` |  |  |  |
-| 180 | `sub_424178` |  |  |  |
-| 181 | `sub_424194` |  |  |  |
-| 182 | `sub_4242B2` |  |  |  |
-| 183 | `sub_424375` |  |  |  |
-| 184 | `sub_4243C0` |  |  |  |
+| 175 | `sub_42B2A0` | vm.sys.Runtime.gc() → void (hash=0x3f528978, static native, argc=0) | natives/vm/sys/Runtime.zig::gc | canonical sub_42B2A0 → sub_40A30B two-pass refcount sweep; mapped to vm.collectGarbage() (conservative mark-sweep). MidtownMadness3 calls ×109/10s. ✓ verified + implemented |
+| 176 | `sub_42B2AD` | vm.sys.Runtime.createTempClass(obj, index) → boolean (hash=0x229b6695, native, argc=2) | natives/vm/sys/Runtime.zig::createTempClass | canonical sub_42B2AD: validates index vs u16 len @obj+18; ALL paths push sub_410060()&1 which is constant 0 in this build (sub_410060 stubbed). ⚠ verified structure; pending-exception codes (sub_410198) not modelled. ✓ push-count verified |
+| 177 | `sub_42B338` | vm.sys.Runtime.getTickCount() → int (hash=0xd724a13d, static native, argc=0) | natives/vm/sys/Runtime.zig::getTickCount | canonical sub_42B338 → sub_406872 ms tick; ONE int slot (vs Gamelet.getTimerTickCount's 2-slot long). Returns deterministic vm.clock_ms. ✓ verified + implemented |
+| 178 | `sub_4240A0` | catalog.Catalog.doesGameExist(GameProperty gp) → boolean (hash=0x7291113f, native, argc=1) | natives/catalog/Catalog.zig::doesGameExist | canonical sub_4240A0 → sub_423BD0(id from gp+52 = field 0xd042e190): record present + device-fingerprint valid. Our records (core.catalogState, catalog.dat) are always fingerprint-valid. ✓ verified + implemented |
+| 179 | `sub_4240E1` | catalog.Catalog.launchGameIfPresent(GameProperty gp) → boolean (hash=0x7291b2a7, native, argc=1) | natives/catalog/Catalog.zig::launchGameIfPresent | canonical sub_4240E1: launcher state 5 → pump sub_403AC2 → app-FSM sub_405A9B loads game from resource store keyed id+0xFFFF. Ours: CatalogHost.launchGame(id) — SDL maps id→path via <flash>/catalog_games.ini, swap applied at tick boundary. ✓ verified + implemented (host-mapped launch) |
+| 180 | `sub_424178` | catalog.Catalog.isUserRegistred() → boolean (hash=0xf53e0494, static native, argc=0) | natives/catalog/Catalog.zig::isUserRegistred | canonical sub_424178 → sub_423B7F: OR of reg-token bytes dword_45FE8C+30..33 (boot default {0,0,0,1} = registered). Ours: catalogState.reg_token. ✓ verified + implemented |
+| 181 | `sub_424194` | catalog.Catalog.downloadGame(GameProperty gp) → void (hash=0xb8fd5108, native, argc=1) | natives/catalog/Catalog.zig::downloadGame | canonical sub_424194: copies URL/id into launcher request, state 6 = server download flow (or error dialog on gate fail). Ours: instant-success — record {id, downloaded} persisted to catalog.dat (no server). ⚠ server protocol not modelled. ✓ structure verified + implemented |
+| 182 | `sub_4242B2` | catalog.Catalog.doEditBox(String prompt) → void (hash=0xf33ed04e, native, argc=1) | natives/catalog/Catalog.zig::doEditBox | canonical sub_4242B2: prompt truncated to 14, dialog type 11, sub_403D8A opens host text input (max 6); result → dialog+16 / event 1539. Ours: CatalogHost.editBox → SDL text input → exen.catalogEditBoxResult 16-byte buffer. ⚠ event-1539 consumer wiring deferred until a gamelet reads it. ✓ structure verified + implemented |
+| 183 | `sub_424375` | catalog.Catalog.atoi(String s) → int (hash=0x1b487d9d, static native, argc=1) | natives/catalog/Catalog.zig::atoi | canonical sub_424375 → sub_422AD2: skip spaces, optional '-', accumulate decimal, -1 on empty/invalid. ✓ verified + implemented |
+| 184 | `sub_4243C0` | catalog.GameProperty.<native>() → void (hash=0x3f52bcb7, native, argc=0) | natives/catalog/GameProperty.zig::noop | canonical sub_4243C0 is literally `return 0` — empty placeholder. ✓ verified + implemented |

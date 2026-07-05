@@ -24,6 +24,8 @@ pub const codec = @import("codecs/codec_1to5.zig");
 pub const text = @import("text.zig");
 pub const bridge = @import("bridge.zig");
 pub const debug = @import("debug/names.zig");
+pub const opcodes = @import("vm/opcodes/mod.zig");
+pub const catalog_state = @import("catalog_state.zig");
 pub const audio = @import("audio.zig");
 pub const haptic = @import("haptic.zig");
 pub const savestate = @import("savestate.zig");
@@ -131,6 +133,10 @@ pub fn boot(
     g_eeprom_path = try std.fs.path.join(allocator, &.{ g_flash_dir, "eeprom.dat" });
     try ensureEepromExists(g_eeprom_path);
 
+    // 3b. catalog.dat — the launcher game registry + registration token
+    //     (canonical keeps these inside the NVRAM blob; see catalog_state.zig).
+    catalogLoad();
+
     // 4. Display profile. Default Manuf.003 (132x176, 8bpp); `manuf_override` or the ini
     //    can switch it. Change the defaults here to target a different screen.
     const manuf_idx: u32 = manuf_override orelse (if (ini) |i| @intCast(@max(0, i.getInt("Manuf.current", "CURRENT_COLOR", 3))) else 3);
@@ -237,6 +243,13 @@ pub fn boot(
 /// per-class implementations under `natives/`.
 pub fn setNativeDispatcher(f: interp.NativeFn) void {
     if (g_vm_interp) |*vm| vm.native_fn = f;
+}
+
+/// Inject the human-readable native-name table (`natives.native_names`,
+/// derived at comptime from the dispatch `entries`). Call next to
+/// `setNativeDispatcher`; without it native stub logs print "?".
+pub fn setNativeNames(names: []const []const u8) void {
+    debug.setNativeNames(names);
 }
 
 /// Load a .exn gamelet (sub_43D57A:36969 + sub_43D350:36922 minus persistence).
@@ -553,6 +566,40 @@ pub var g_keypress_pending: bool = false;
 pub var g_keyrelease_pending: bool = false;
 pub var g_key_code: i32 = 0;
 
+/// `onSmsSent(boolean)` gamelet callback (hash 0x305a7631, verified in
+/// core/debug/names.zig). Fired one tick after `Gamelet.sendSms` to
+/// mirror canonical's async event-257 (send result) — this is what
+/// releases a gamelet's "Waiting for a reply…" screen.
+const ONSMSSENT_HASH: u32 = 0x305a7631;
+
+/// SMS send result pending delivery to the gamelet (drained in tick(),
+/// like g_keypress_pending). There is no SMS server in this environment,
+/// so the default fallback reports every send as successful.
+pub var g_sms_result_pending: bool = false;
+pub var g_sms_result_success: bool = true;
+
+/// Optional host SMS transport. A frontend with real connectivity can
+/// register one; `send` returns true on success. When null (the norm),
+/// `smsSend` synthesizes an immediate success — the no-server fallback.
+pub const SmsBackend = struct {
+    send: *const fn (msg_index: u32) bool,
+};
+var g_sms_backend: ?SmsBackend = null;
+
+pub fn setSmsBackend(b: ?SmsBackend) void {
+    g_sms_backend = b;
+}
+
+/// Called by `Gamelet.sendSms` (idx 78). Routes to the host backend if
+/// registered, else reports success (fallback). Either way the result
+/// is delivered to the gamelet's `onSmsSent` callback on the next tick.
+pub fn smsSend(msg_index: u32) void {
+    const ok = if (g_sms_backend) |b| b.send(msg_index) else true;
+    g_sms_result_success = ok;
+    g_sms_result_pending = true;
+    log.info("Sms.send(idx={d}) → {s} (deferred onSmsSent)", .{ msg_index, if (ok) "success" else "failure" });
+}
+
 /// Period (ms) the gamelet requested via `exen.Gamelet.startTimer`.
 /// The host loop uses this to throttle `tick()` so animations play
 /// at the original phone-era cadence (typically ~150ms for ExEn 2
@@ -600,7 +647,7 @@ fn deliverEventFlags(vm: *interp.Vm) void {
     // array (turning byte[1] into the FIRE key code 0xf8 = i8(-8)
     // truncated), making FIRE on "Jeu" trigger the wrong branch.
     // Restrict to `Bootstrap.statics[0]` — the canonical event-source
-    // pointer, same one `dispatchKeyLifecycle` uses.
+    // pointer, same one `dispatchGameletCallback` uses.
     const bs = vm.class_objects.get(class_registry.CLASS_VM_SYS_BOOTSTRAP) orelse return;
     const gamelet_handle = bs.statics[0];
     if (gamelet_handle == 0) return;
@@ -627,7 +674,7 @@ fn deliverEventFlags(vm: *interp.Vm) void {
     }
     // NOTE: do NOT clear `g_keypress_pending` here. Two consumers per
     // tick read it — first this function (sets the event-array bit
-    // 0x04 for poll-based wait loops), then `dispatchKeyLifecycle` in
+    // 0x04 for poll-based wait loops), then `dispatchGameletCallback` in
     // `tick()` (invokes the gamelet's keypress method). Clearing it
     // here made the lifecycle dispatch dead code, breaking menu nav
     // in gamelets like Crash that handle nav via `keypress(int)`
@@ -640,7 +687,10 @@ pub fn tick(delta_ms: u32) void {
     if (g_vm_interp == null) return;
     const vm = &g_vm_interp.?;
     vm.clock_ms +%= delta_ms; // deterministic time source (see Vm.clock_ms)
-    interp.Vm.trace = (g_tick_count == 1);
+    // Auto-trace tick 1 for boot visibility. But when a method filter is set
+    // (--trace-method), keep trace on across ALL ticks so the filtered method
+    // is captured wherever it runs (menu/gameplay), not just at boot.
+    interp.Vm.trace = (g_tick_count == 1) or (interp.Vm.trace_only_method_hash != 0);
     vm.slab_top = 0;
 
     // Deliver event flags BEFORE the gamelet's tick runs so its
@@ -651,12 +701,20 @@ pub fn tick(delta_ms: u32) void {
     // keypress/keyrelease lifecycle methods (passing the ExEn
     // key code), so menu navigation works. Consumed once per tick.
     if (g_keypress_pending) {
-        dispatchKeyLifecycle(vm, class_registry.METHOD_KEYPRESS, g_key_code);
+        dispatchGameletCallback(vm, class_registry.METHOD_KEYPRESS, g_key_code);
         g_keypress_pending = false;
     }
     if (g_keyrelease_pending) {
-        dispatchKeyLifecycle(vm, class_registry.METHOD_KEYRELEASE, g_key_code);
+        dispatchGameletCallback(vm, class_registry.METHOD_KEYRELEASE, g_key_code);
         g_keyrelease_pending = false;
+    }
+
+    // Deliver a pending SMS send-result to the gamelet's onSmsSent(bool)
+    // callback (canonical event 257, one tick after the send). Releases
+    // "Waiting for a reply…" screens.
+    if (g_sms_result_pending) {
+        g_sms_result_pending = false;
+        dispatchGameletCallback(vm, ONSMSSENT_HASH, if (g_sms_result_success) 1 else 0);
     }
 
     vm.halted = false;
@@ -750,6 +808,91 @@ var g_save_backend: ?SaveBackend = null;
 /// to the default (per-gamelet files under `<flash_dir>/save-*.dat`).
 pub fn setSaveBackend(b: ?SaveBackend) void {
     g_save_backend = b;
+}
+
+// ── Catalog subsystem (canonical launcher state, see catalog_state.zig) ────
+
+/// Host-side services the Catalog natives need but core can't provide:
+/// actually launching another gamelet, and opening a text-input box.
+/// Mirrors `setNativeDispatcher`/`setSaveBackend` injection. Frontends
+/// without these facilities (wasm, libretro) pass null — the natives
+/// then degrade to "game not launchable / no input" (like a device
+/// with no network).
+pub const CatalogHost = struct {
+    /// Launch the game registered under `id`. Return true if a launch
+    /// was actually started (canonical: launcher state 5 → app-FSM
+    /// loads the game from the resource store keyed id+0xFFFF; our
+    /// hosts map id → .exn path instead).
+    launchGame: *const fn (id: u16) bool,
+    /// Open a host text-input box (canonical sub_403D8A, max_len
+    /// capped at 16). Deliver the result asynchronously via
+    /// `catalogEditBoxResult`.
+    editBox: *const fn (prompt: []const u8, max_len: u8) void,
+};
+
+var g_catalog_host: ?CatalogHost = null;
+var g_catalog_state: catalog_state.State = .{};
+/// Canonical dialog+16: the 16-byte buffer edit-box input lands in.
+var g_editbox_buf: [16]u8 = .{0} ** 16;
+var g_editbox_len: usize = 0;
+
+pub fn setCatalogHost(h: ?CatalogHost) void {
+    g_catalog_host = h;
+}
+
+/// The flash (persistent-data) directory resolved at boot — hosts use
+/// it to locate their own sidecar files (e.g. catalog_games.ini).
+pub fn flashDir() []const u8 {
+    return g_flash_dir;
+}
+
+pub fn catalogHost() ?CatalogHost {
+    return g_catalog_host;
+}
+
+pub fn catalogState() *catalog_state.State {
+    return &g_catalog_state;
+}
+
+/// Deliver edit-box input from the host (canonical copies the string
+/// into dialog+16, capped at 16 bytes; the gamelet polls it back).
+pub fn catalogEditBoxResult(s: []const u8) void {
+    const n = @min(s.len, g_editbox_buf.len);
+    @memcpy(g_editbox_buf[0..n], s[0..n]);
+    g_editbox_len = n;
+    log.info("catalog: edit-box result ({d} bytes)", .{n});
+}
+
+pub fn catalogEditBoxBuffer() []const u8 {
+    return g_editbox_buf[0..g_editbox_len];
+}
+
+fn catalogPath(buf: []u8) ?[]u8 {
+    if (g_flash_dir.len == 0) return null;
+    return std.fmt.bufPrint(buf, "{s}catalog.dat", .{g_flash_dir}) catch null;
+}
+
+fn catalogLoad() void {
+    var path_buf: [512]u8 = undefined;
+    const path = catalogPath(&path_buf) orelse return;
+    var data_buf: [16 + 3 * catalog_state.MAX_RECORDS]u8 = undefined;
+    const f = std.fs.cwd().openFile(path, .{}) catch return; // absent = fresh
+    defer f.close();
+    const n = f.readAll(&data_buf) catch return;
+    g_catalog_state = catalog_state.State.parse(data_buf[0..n]);
+    log.info("catalog: {d} record(s) loaded", .{g_catalog_state.count});
+}
+
+/// Persist the catalog registry (called by the natives on mutation —
+/// canonical piggybacks on the NVRAM blob flush).
+pub fn catalogPersist() void {
+    var path_buf: [512]u8 = undefined;
+    const path = catalogPath(&path_buf) orelse return;
+    var data_buf: [16 + 3 * catalog_state.MAX_RECORDS]u8 = undefined;
+    const bytes = g_catalog_state.serialize(&data_buf);
+    const f = std.fs.cwd().createFile(path, .{}) catch return;
+    defer f.close();
+    f.writeAll(bytes) catch {};
 }
 
 /// Sanitise the gamelet name into a filesystem-safe slot id.
@@ -857,12 +1000,13 @@ pub fn signalKeyrelease(key_code: i32) void {
     g_key_code = key_code;
 }
 
-/// Resolve and invoke the gamelet's `keypress` / `keyrelease`
-/// lifecycle methods with the provided ExEn key code. Falls
-/// silently if neither is overridden by the gamelet — the byte-
-/// array flag we set in `deliverEventFlags` still wakes any
-/// polling-based wait loop.
-fn dispatchKeyLifecycle(vm: *interp.Vm, method_hash: u32, key_code: i32) void {
+/// Resolve a gamelet callback by method hash on the Bootstrap gamelet
+/// object and invoke it with one int argument. Used for keypress /
+/// keyrelease lifecycle (arg = ExEn key code) and onSmsSent (arg =
+/// 1/0 success). Falls silently if the gamelet doesn't override it —
+/// for key events the byte-array flag from `deliverEventFlags` still
+/// wakes any polling wait loop. `arg0` names the single int argument.
+fn dispatchGameletCallback(vm: *interp.Vm, method_hash: u32, arg0: i32) void {
     const bs = vm.class_objects.get(class_registry.CLASS_VM_SYS_BOOTSTRAP) orelse return;
     const gamelet_handle = bs.statics[0];
     if (gamelet_handle == 0) return;
@@ -883,9 +1027,9 @@ fn dispatchKeyLifecycle(vm: *interp.Vm, method_hash: u32, key_code: i32) void {
     // locals[0], the key code was dropped, and downstream TABLESWITCH
     // saw the handle value (1) instead of the real key (e.g. 56 for
     // DOWN) — landing in Gamelet.throwInternalException.
-    var args = [_]u32{@bitCast(key_code)};
+    var args = [_]u32{@bitCast(arg0)};
     vm.invokeMethodInfo(mi, null, &args) catch |err| {
-        log.warn("key lifecycle dispatch failed: {s}", .{@errorName(err)});
+        log.warn("gamelet callback dispatch failed: {s}", .{@errorName(err)});
     };
 }
 

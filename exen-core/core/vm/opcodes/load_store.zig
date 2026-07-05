@@ -160,6 +160,31 @@ pub fn opLoadOp(_: *Vm, frame: *Frame, _: u8) Error!void {
     try frame.push(frame.slab[slot]);
 }
 
+/// LLOAD (opcode 0xd7, canonical sub_40D091) — push the 2-slot long at
+/// local `slot`/`slot+1`. `slot` is a single u8 operand (no alignment),
+/// matching ILOAD (0xd5) / ISTORE (0xd6) in this ExEn-specific band.
+pub fn opLloadOp(_: *Vm, frame: *Frame, _: u8) Error!void {
+    if (frame.pc >= frame.bytecode.len) return Error.StackUnderflow;
+    const slot = frame.bytecode[frame.pc];
+    frame.pc += 1;
+    if (@as(u32, slot) + 1 >= frame.locals_count) return Error.StackUnderflow;
+    try frame.push(frame.slab[slot]);
+    try frame.push(frame.slab[slot + 1]);
+}
+
+/// LSTORE (opcode 0xd8, canonical sub_40D69C) — pop a 2-slot long into
+/// local `slot`/`slot+1` (lo then hi, matching the LSTORE_n handlers).
+pub fn opLstoreOp(_: *Vm, frame: *Frame, _: u8) Error!void {
+    if (frame.pc >= frame.bytecode.len) return Error.StackUnderflow;
+    const slot = frame.bytecode[frame.pc];
+    frame.pc += 1;
+    const hi = try frame.pop();
+    const lo = try frame.pop();
+    if (@as(u32, slot) + 1 >= frame.locals_count) return Error.StackUnderflow;
+    frame.slab[slot] = lo;
+    frame.slab[slot + 1] = hi;
+}
+
 pub fn opLstore0(_: *Vm, frame: *Frame, _: u8) Error!void {
     const hi = try frame.pop();
     const lo = try frame.pop();

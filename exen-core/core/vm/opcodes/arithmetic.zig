@@ -327,3 +327,104 @@ pub fn opLsub(_: *Vm, frame: *Frame, _: u8) Error!void {
     frame.slab[frame.sp + 1] = @truncate(r >> 32);
     frame.sp += 2;
 }
+
+/// LDIV (opcode 0x6d, canonical sub_40CFCF) — signed long division.
+/// Mirrors opLrem's stack shape (pop 2 longs, push 1) and fault
+/// discipline: divide-by-zero halts the tick via the same non-catchable
+/// path opIdiv/opLrem use. The LONG_MIN / -1 overflow case is guarded
+/// so Zig's @divTrunc doesn't trip illegal-behaviour (result wraps to
+/// LONG_MIN, matching two's-complement hardware and the JVM).
+pub fn opLdiv(vm: *Vm, frame: *Frame, _: u8) Error!void {
+    if (frame.sp < 4) return Error.StackUnderflow;
+    const b_lo = frame.slab[frame.sp - 2];
+    const b_hi = frame.slab[frame.sp - 1];
+    const a_lo = frame.slab[frame.sp - 4];
+    const a_hi = frame.slab[frame.sp - 3];
+    const a: i64 = @bitCast((@as(u64, a_hi) << 32) | a_lo);
+    const b: i64 = @bitCast((@as(u64, b_hi) << 32) | b_lo);
+    if (b == 0) {
+        frame.sp -= 4;
+        vm.halted = true;
+        vm.halt_reason = .{ .method_not_found = 0 };
+        return;
+    }
+    const result: i64 = if (a == std.math.minInt(i64) and b == -1) a else @divTrunc(a, b);
+    const r_u: u64 = @bitCast(result);
+    frame.sp -= 4;
+    frame.slab[frame.sp] = @truncate(r_u);
+    frame.slab[frame.sp + 1] = @truncate(r_u >> 32);
+    frame.sp += 2;
+}
+
+/// LNEG (opcode 0x75, canonical sub_40D242) — negate a long in place.
+/// Pops 1 long (2 slots), pushes 1 long — net SP delta 0. Wrapping
+/// negation so LONG_MIN maps to itself (two's-complement).
+pub fn opLneg(_: *Vm, frame: *Frame, _: u8) Error!void {
+    if (frame.sp < 2) return Error.StackUnderflow;
+    const lo = frame.slab[frame.sp - 2];
+    const hi = frame.slab[frame.sp - 1];
+    const a: i64 = @bitCast((@as(u64, hi) << 32) | lo);
+    const r_u: u64 = @bitCast(-%a);
+    frame.slab[frame.sp - 2] = @truncate(r_u);
+    frame.slab[frame.sp - 1] = @truncate(r_u >> 32);
+}
+
+/// LSHL (opcode 0x79, canonical sub_40D5EE) — long shift left.
+/// Stack: ..., long(lo,hi), int-shift → ..., long. Net SP delta -1 slot.
+/// Shift count masked to low 6 bits per JVM long-shift semantics.
+pub fn opLshl(_: *Vm, frame: *Frame, _: u8) Error!void {
+    if (frame.sp < 3) return Error.StackUnderflow;
+    const shift_u32 = frame.slab[frame.sp - 1];
+    const a_lo = frame.slab[frame.sp - 3];
+    const a_hi = frame.slab[frame.sp - 2];
+    const a: u64 = (@as(u64, a_hi) << 32) | a_lo;
+    const shift: u6 = @truncate(shift_u32 & 0x3F);
+    const r: u64 = a << shift;
+    frame.sp -= 3;
+    frame.slab[frame.sp] = @truncate(r);
+    frame.slab[frame.sp + 1] = @truncate(r >> 32);
+    frame.sp += 2;
+}
+
+/// LUSHR (opcode 0x7d, canonical sub_40D83F) — unsigned long right shift.
+/// Same stack shape as LSHR/LSHL; zero-fills from the top.
+pub fn opLushr(_: *Vm, frame: *Frame, _: u8) Error!void {
+    if (frame.sp < 3) return Error.StackUnderflow;
+    const shift_u32 = frame.slab[frame.sp - 1];
+    const a_lo = frame.slab[frame.sp - 3];
+    const a_hi = frame.slab[frame.sp - 2];
+    const a: u64 = (@as(u64, a_hi) << 32) | a_lo;
+    const shift: u6 = @truncate(shift_u32 & 0x3F);
+    const r: u64 = a >> shift;
+    frame.sp -= 3;
+    frame.slab[frame.sp] = @truncate(r);
+    frame.slab[frame.sp + 1] = @truncate(r >> 32);
+    frame.sp += 2;
+}
+
+/// LOR (opcode 0x81, canonical sub_40D46C) — long bitwise OR.
+/// Same shape as LAND (sub_40CB3B): pop 2 longs, push 1, per-word op.
+pub fn opLor(_: *Vm, frame: *Frame, _: u8) Error!void {
+    if (frame.sp < 4) return Error.StackUnderflow;
+    const b_lo = frame.slab[frame.sp - 2];
+    const b_hi = frame.slab[frame.sp - 1];
+    const a_lo = frame.slab[frame.sp - 4];
+    const a_hi = frame.slab[frame.sp - 3];
+    frame.sp -= 4;
+    frame.slab[frame.sp] = a_lo | b_lo;
+    frame.slab[frame.sp + 1] = a_hi | b_hi;
+    frame.sp += 2;
+}
+
+/// LXOR (opcode 0x83, canonical sub_40D911) — long bitwise XOR.
+pub fn opLxor(_: *Vm, frame: *Frame, _: u8) Error!void {
+    if (frame.sp < 4) return Error.StackUnderflow;
+    const b_lo = frame.slab[frame.sp - 2];
+    const b_hi = frame.slab[frame.sp - 1];
+    const a_lo = frame.slab[frame.sp - 4];
+    const a_hi = frame.slab[frame.sp - 3];
+    frame.sp -= 4;
+    frame.slab[frame.sp] = a_lo ^ b_lo;
+    frame.slab[frame.sp + 1] = a_hi ^ b_hi;
+    frame.sp += 2;
+}

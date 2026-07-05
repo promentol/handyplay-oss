@@ -15,6 +15,7 @@ const Handle = bridge.Handle;
 
 const log = std.log.scoped(.natives);
 
+pub const class_name: []const u8 = "Resource";
 pub const first_index: u32 = 30;
 pub const last_index: u32 = 42;
 
@@ -39,7 +40,18 @@ fn withResource(
 fn readByteOp(st: *core.exn.ResourceState, raw: []const u8) ?u32 {
     return @as(u32, st.readByte(raw) orelse return null);
 }
+/// readShort (idx 33, sub_428C79): the canonical reads 2 bytes into a
+/// SIGNED `__int16` and assigns it to a DWORD (`*(_DWORD*)a1 = Buffer`),
+/// which SIGN-EXTENDS — so 0xFFFF returns -1, not 65535. Getting this
+/// wrong makes a -1 sentinel read back as 65535, which slips past a
+/// gamelet's `if (id < 0)` guard and gets used as an out-of-range
+/// resource id (MutantAlert's level-init halted here forever).
 fn readShortOp(st: *core.exn.ResourceState, raw: []const u8) ?u32 {
+    const v = st.readShort(raw) orelse return null;
+    return @bitCast(@as(i32, @as(i16, @bitCast(v))));
+}
+/// readChar (idx 35, sub_428DA2): unsigned — 0xFFFF stays 65535.
+fn readCharOp(st: *core.exn.ResourceState, raw: []const u8) ?u32 {
     return @as(u32, st.readShort(raw) orelse return null);
 }
 fn readIntOp(st: *core.exn.ResourceState, raw: []const u8) ?u32 {
@@ -107,9 +119,15 @@ fn readByte(vm: *Vm, args: bridge.ArgFrame) i16 {
     return 1;
 }
 
-// ── [33] readShort(this) / [35] readChar(this) ──────────────────────────────
+// ── [33] readShort(this) — sub_428C79, SIGN-extended 16-bit ─────────────────
 fn readShort(vm: *Vm, args: bridge.ArgFrame) i16 {
     args.setReturn(withResource(vm, args.this(), u32, readShortOp) orelse 0);
+    return 1;
+}
+
+// ── [35] readChar(this) — unsigned 16-bit (0xFFFF → 65535) ──────────────────
+fn readChar(vm: *Vm, args: bridge.ArgFrame) i16 {
+    args.setReturn(withResource(vm, args.this(), u32, readCharOp) orelse 0);
     return 1;
 }
 
@@ -267,17 +285,28 @@ fn getResourceType(vm: *Vm, args: bridge.ArgFrame) i16 {
     return 1;
 }
 
-pub const handle = bridge.canonical(.{
+/// Known names for idxs in this class's range that have NO Zig handler
+/// yet (they hit `defaultNativeStub` at runtime). Consumed by
+/// `natives/mod.zig::native_names` for logs/tools; idxs in range but
+/// absent here AND in `entries` render as "Class.?N". When porting one
+/// of these, move the row into `entries` with its handler.
+pub const stub_names = .{
+    .{ 41, "getNbResources" },   // sub_4297FA
+};
+
+pub const entries = .{
     .{ 30, "<init>",            ctor },
     .{ 31, "readBoolean",       readBoolean },
     .{ 32, "readInt",           readInt },
     .{ 33, "readShort",         readShort },
     .{ 34, "readByte",          readByte },
-    .{ 35, "readChar",          readShort }, // same wire format as readShort
+    .{ 35, "readChar",          readChar }, // unsigned 16-bit (readShort is signed)
     .{ 36, "readBytes",         readBytes },
     .{ 37, "readShorts",        readShorts },
     .{ 38, "readInts",          readInts },
     .{ 39, "readUTF",           readUTF },
     .{ 40, "readStringByIndex", readStringByIndex },
     .{ 42, "getResourceType",   getResourceType },
-});
+};
+
+pub const handle = bridge.canonical(entries);

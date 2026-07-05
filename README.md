@@ -184,20 +184,31 @@ SDL frontend see each core's docs.
 | Near-term | **libretro builds** | Ship `<core>_libretro.{so,dylib}` for RetroArch. |
 | Ongoing | **Improving game compatibility** | Continuously widening the set of titles that boot and play correctly across every core. |
 | Ongoing | **Game compatibility charts** | Per-core, per-game playable/boots/broken tables driven by an automated boot-and-render harness. |
-| 2026 Q4 | **Mophun core** | Synergenix Mophun VM (Sony Ericsson et al.) — 2D titles. |
-| 2027 Q1 | **Mophun 3D core** | Mophun's 3D (fixed-function) pipeline, with Software rasterized  **OpenGL ES 1.1** implementation |
-| 2027 Q2 | **Drop Unicorn dependency** | Replace the vendored Unicorn in `mre-core` / `mrp-core` with our own ARM interpreter — no native dep, so every core cross-compiles freely to all platforms. |
-| 2027 Q3 | **new Java core** | J2ME-family VM covering MIDP 1 and Midp2  |
-| 2027 Q4 | **Ketai** | extering J2ME core with NTT DoCoMo **DoJa** and J-PHONE/Vodafone **J-SKY**. |
-| 2028 | **Open-source BIOS** | Clean-room, freely redistributable replacements for the proprietary firmware/fonts each core needs — so the cores run with no user-supplied blobs. |
-| 2028 | **BREW**| Qualcomm BREW applications, including KDDI/au **EZplus** and **Zeebo** |
-| 2029 | **Symbian** | Symbian/S60 game support, including Nokia **N-Gage**. |
-| Under consideration | **Flash Lite** | Adobe Flash Lite mobile content. |
-| Under consideration | **Palm OS** | Palm OS games and apps. |
+| 2026 Q4 | **new Java core** | J2ME-family VM covering MIDP 1 / 2 and vendor-specific libraries (Nokia UI, Siemens, Sony Ericsson, Motorola). |
+| 2027 Q1 | **Ketai** | Extending the J2ME core with NTT DoCoMo **DoJa**, J-PHONE/Vodafone **J-SKY**, and the HI Corp **Mascot Capsule** 3D engine (the dominant feature-phone 3D middleware). |
+| 2027 Q2 | **M3G (Mobile 3D)** | Mobile 3D Graphics (JSR-184 / M3G) for the Java core — the retained-mode scene graph that 3D J2ME games render through. |
+| 2027 Q3 – 2027 Q4 | **Mophun core** | Synergenix Mophun VM (Sony Ericsson et al.) — 2D titles plus the 3D (fixed-function) pipeline via a software-rasterized **OpenGL ES 1.1** implementation. |
+| 2028 Q1 | **Open-source BIOS** | Clean-room, freely redistributable replacements for the proprietary firmware/fonts each core needs — so the cores run with no user-supplied blobs. |
+| 2028 Q2 | **Drop Unicorn dependency** | Replace the vendored Unicorn in `mre-core` / `mrp-core` with our own ARM interpreter — no native dep, so every core cross-compiles freely to all platforms. |
+| 2028 Q3 – 2028 Q4 | **Java touch + later APIs** | The Java core's late-era APIs — touchscreen (pointer) input, MMAPI (JSR-135), sensors, and MIDP 2.1-era APIs. |
+| 2029 Q1 – 2029 Q4 | **Palm OS** | Palm OS games (the PDA / Treo library). |
+| 2030 Q1 – 2030 Q2 | **BREW** *(1 of 2)* | Qualcomm BREW runtime + the carrier "Get It Now"–era catalog (incl. BREW 3D). |
+| 2030 Q3 – 2030 Q4 | **Zeebo + EZ-appli** *(2 of 2)* | BREW-based platforms — the **Zeebo** console (emerging markets) and KDDI/au **EZ-appli**. |
+| 2031 Q1 – 2031 Q4 | **N-Gage** *(early Symbian — beta)* | A minimal Symbian S60 v1 core scoped to the original Nokia **N-Gage** / QD — one fixed device and its finite catalog: the Symbian beachhead. |
+| 2032 Q1 – 2032 Q4 | **Symbian 6–8** | Broaden the early-Symbian core to general S60 1st & 2nd Edition (Symbian OS 6–8) games. |
+| 2033 Q1 – 2033 Q4 | **Symbian 9 + N-Gage 2.0** | Symbian OS 9.x / S60 3rd Edition games and the **N-Gage 2.0** platform. |
+| Under consideration | **Flash Lite** | Adobe Flash Lite mobile content (the feature-phone profile) — full desktop Adobe Flash is out of scope. |
 | Under consideration | **KaiOS / webOS** | KaiOS, webOS, and other HTML5/canvas-based mobile game runtimes. |
+| Under consideration | **Tizen** | Samsung Tizen — its smart-TV and wearable HTML5/web game runtimes (a webOS sibling). |
 | Under consideration | **Brick Game handhelds** | The "9999-in-1" Tetris-style LCD handhelds (Holtek HT1130-class single-chip MCUs) and similar segment/dot-matrix LCD games. |
 | Under consideration | **Virtual pets** | Tamagotchi and other LCD virtual-pet toys on Epson E0C6S46-class 4-bit MCUs. |
 | Under consideration | **VT NES-on-a-chip** | V.R. Technology famiclone SoCs — VT01, VT02, VT03, VT03_HR, VT08, VT09_TV, VT09_LCD, VT168, VT268 — behind plug-and-play TV games and "*-in-1" multicarts. |
+| Under consideration | **SunPlus / GeneralPlus** | The other big plug-and-play / "NN-in-1" TV-game SoC family (JAKKS Pacific, Lexibook, et al.) beyond VT. |
+| Under consideration | **Korean game VMs** | GVM (Gamevil), GNEX (Neomtel), and SKVM — the game runtimes that ran under Korea's WIPI feature phones. |
+| Under consideration | **BlackBerry** | RIM BlackBerry J2ME plus the RIM-specific APIs. |
+| Under consideration | **bada** | Samsung bada — the pre-Tizen smartphone OS and its Wave-series app/game store. |
+| Under consideration | **iPhone (pre-3GS)** | Early iPhone OS games on the original iPhone / iPhone 3G — ARM11 (ARM1176, ARMv6) CPU, pre-3GS. |
+| Under consideration | **Game Boy / Game Boy Color** | DMG/CGB cartridges with Game Link Cable support — multiplayer link play tunneled over TCP/IP and Bluetooth. |
 | Under consideration | **Other platforms** | WIPI, Windows Mobile / Pocket PC, and other early-mobile gaming runtimes. |
 
 ## License

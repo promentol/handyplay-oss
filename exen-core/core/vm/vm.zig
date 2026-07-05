@@ -446,11 +446,11 @@ pub const Vm = struct {
             const method_match = trace_only_method_hash == 0 or
                 frame.method.hash == trace_only_method_hash;
             if ((trace or burst_on) and method_match) log.debug("    {s} (0x{x:0>2}) @ PC=0x{x:0>4} in {s}", .{
-                dbg.opName(op), op, opc_pc, classStr(frame.class_hash),
+                opcodes.opName(op), op, opc_pc, classStr(frame.class_hash),
             });
             handlers[op](self, frame, op) catch |e| {
                 log.warn("{s} (0x{x:0>2}) at PC=0x{x:0>4} failed: {s}", .{
-                    dbg.opName(op), op, opc_pc, @errorName(e),
+                    opcodes.opName(op), op, opc_pc, @errorName(e),
                 });
                 self.halted = true;
                 return e;

@@ -1,7 +1,15 @@
-//! Human-readable names for opcodes, classes, methods, and natives.
+//! Human-readable names for classes, methods, fields, and natives.
 //! Used by the interpreter's verbose log lines so traces show
 //! `INVOKEVIRTUAL exen.Graphics.drawImage` instead of
-//! `op 0xee method_hash=0x43d2c07b class=0xc6ed8e2a`.
+//! `method_hash=0x43d2c07b class=0xc6ed8e2a`.
+//!
+//! Opcode mnemonics/widths live on `core/vm/opcodes/mod.zig::op_specs`
+//! (single source with the dispatch bindings); native idx→name comes
+//! from `natives.native_names` injected at boot (same single-source
+//! rule — see `native_name_table` below). What remains HERE is the
+//! hand-verified reverse-engineering knowledge that no live structure
+//! carries: hash→name tables for classes, scoped methods, and fields,
+//! plus the canonical `sub_*` address table.
 //!
 //! All class hashes recovered by computing CRC-32 of the class name
 //! (e.g. `crc32("exen.Graphics") == 0xc6ed8e2a`) against the
@@ -11,192 +19,6 @@
 
 const std = @import("std");
 
-/// One opcode's metadata: name + operand width (number of bytecode
-/// bytes consumed after the opcode byte). The interpreter handles
-/// 2-byte-operand alignment (`PC = (PC + 1) & ~1`) internally; this
-/// table just reports the nominal width so a disassembler can step
-/// over an instruction. `operands` = -1 marks variable-length
-/// opcodes (TABLESWITCH / LOOKUPSWITCH) that callers must inspect.
-pub const Op = struct {
-    name: []const u8,
-    operands: i8 = 0,
-};
-
-/// Single source of truth for the 256-entry opcode dispatch table.
-/// Mirrors `off_454498[]` in `reference/ref` and the runtime
-/// bindings in `core/vm/opcodes/mod.zig` (the binder there is the
-/// final authority for which handler runs; this table just gives
-/// names + operand widths for tracing and disasm).
-pub const opcodes: [256]Op = blk: {
-    var t: [256]Op = [_]Op{.{ .name = "OP_??", .operands = 0 }} ** 256;
-
-    // 0x00..0x08 — primitive constants
-    t[0x00] = .{ .name = "NOP" };
-    t[0x01] = .{ .name = "ACONST_NULL" };
-    t[0x02] = .{ .name = "ICONST_M1" };
-    t[0x03] = .{ .name = "ICONST_0" };
-    t[0x04] = .{ .name = "ICONST_1" };
-    t[0x05] = .{ .name = "ICONST_2" };
-    t[0x06] = .{ .name = "ICONST_3" };
-    t[0x07] = .{ .name = "ICONST_4" };
-    t[0x08] = .{ .name = "ICONST_5" };
-    t[0x09] = .{ .name = "LCONST_0" };
-    t[0x0A] = .{ .name = "LCONST_1" };
-
-    // 0x10..0x14 — pushes with operand
-    t[0x10] = .{ .name = "BIPUSH", .operands = 1 };
-    t[0x11] = .{ .name = "SIPUSH", .operands = 2 };
-    t[0x12] = .{ .name = "LDC", .operands = 2 };
-    t[0x14] = .{ .name = "LDC2_W", .operands = 2 };
-
-    // ALOAD family
-    t[0x19] = .{ .name = "ALOAD", .operands = 1 };
-    t[0x2A] = .{ .name = "ALOAD_0" };
-    t[0x2B] = .{ .name = "ALOAD_1" };
-    t[0x2C] = .{ .name = "ALOAD_2" };
-    t[0x2D] = .{ .name = "ALOAD_3" };
-
-    // Typed array loads (BALOAD/CALOAD/AALOAD/IALOAD)
-    t[0x2E] = .{ .name = "IALOAD" };
-    t[0x32] = .{ .name = "AALOAD" };
-    t[0x33] = .{ .name = "BALOAD" };
-    t[0x34] = .{ .name = "CALOAD" };
-    t[0x35] = .{ .name = "IALOAD" };
-
-    // ASTORE family
-    t[0x3A] = .{ .name = "ASTORE", .operands = 1 };
-    t[0x4A] = .{ .name = "ASTORE_op", .operands = 1 };
-    t[0x4B] = .{ .name = "ASTORE_0" };
-    t[0x4C] = .{ .name = "ASTORE_1" };
-    t[0x4D] = .{ .name = "ASTORE_2" };
-    t[0x4E] = .{ .name = "ASTORE_3" };
-
-    // Typed array stores (interpreter routes 0x4F..0x55 to one handler)
-    t[0x4F] = .{ .name = "ARRSTORE" };
-    t[0x50] = .{ .name = "ARRSTORE" };
-    t[0x51] = .{ .name = "ARRSTORE" };
-    t[0x52] = .{ .name = "ARRSTORE" };
-    t[0x53] = .{ .name = "ARRSTORE" };
-    t[0x54] = .{ .name = "ARRSTORE" };
-    t[0x55] = .{ .name = "ARRSTORE" };
-
-    // Stack manipulation
-    t[0x56] = .{ .name = "POP" };
-    t[0x57] = .{ .name = "POP" };
-    t[0x58] = .{ .name = "POP2" };
-    t[0x59] = .{ .name = "DUP" };
-    t[0x5A] = .{ .name = "DUP_X1" };
-    t[0x5C] = .{ .name = "DUP2" };
-
-    // Arithmetic (ExEn-canonical opcodes — IADD at 0x60, IMUL at 0x68)
-    t[0x60] = .{ .name = "IADD" };
-    t[0x61] = .{ .name = "LADD" };
-    t[0x64] = .{ .name = "ISUB" };
-    t[0x65] = .{ .name = "LSUB" };
-    t[0x68] = .{ .name = "IMUL" };
-    t[0x6C] = .{ .name = "IDIV" };
-    t[0x70] = .{ .name = "IREM" };
-    t[0x74] = .{ .name = "INEG" };
-    t[0x78] = .{ .name = "ISHL" };
-    t[0x7A] = .{ .name = "ISHR" };
-    t[0x7C] = .{ .name = "IUSHR" };
-    t[0x7E] = .{ .name = "IAND" };
-    t[0x80] = .{ .name = "IOR" };
-    t[0x82] = .{ .name = "IXOR" };
-    t[0x84] = .{ .name = "IINC", .operands = 2 };
-
-    // Type conversion
-    t[0x85] = .{ .name = "I2L" }; // canonical sub_40AE2B
-    t[0x91] = .{ .name = "I2B" };
-    t[0x92] = .{ .name = "I2C" };
-    t[0x93] = .{ .name = "I2S" };
-    t[0x94] = .{ .name = "LCMP" }; // canonical sub_40CC67 (unsigned 64-bit)
-
-    // Branches — 2-byte target offset (16-bit aligned)
-    t[0x99] = .{ .name = "IFEQ", .operands = 2 };
-    t[0x9A] = .{ .name = "IFNE", .operands = 2 };
-    t[0x9B] = .{ .name = "IFLT", .operands = 2 };
-    t[0x9C] = .{ .name = "IFGE", .operands = 2 };
-    t[0x9D] = .{ .name = "IFGT", .operands = 2 };
-    t[0x9E] = .{ .name = "IFLE", .operands = 2 };
-    t[0x9F] = .{ .name = "IF_ICMPEQ", .operands = 2 };
-    t[0xA0] = .{ .name = "IF_ICMPNE", .operands = 2 };
-    t[0xA1] = .{ .name = "IF_ICMPLT", .operands = 2 };
-    t[0xA2] = .{ .name = "IF_ICMPGE", .operands = 2 };
-    t[0xA3] = .{ .name = "IF_ICMPGT", .operands = 2 };
-    t[0xA4] = .{ .name = "IF_ICMPLE", .operands = 2 };
-    t[0xA5] = .{ .name = "IFNULL", .operands = 2 };
-    t[0xA6] = .{ .name = "IFNONNULL", .operands = 2 };
-    t[0xA7] = .{ .name = "GOTO", .operands = 2 };
-
-    // Returns
-    t[0xB0] = .{ .name = "ARETURN" };
-    t[0xB1] = .{ .name = "RETURN" };
-
-    // Allocation + array length
-    t[0xBB] = .{ .name = "NEW", .operands = 2 };
-    t[0xBC] = .{ .name = "NEWARRAY", .operands = 2 };
-    t[0xC5] = .{ .name = "MULTIANEWARRAY" }; // canonical sub_40E90A; variable operand length
-    t[0xBE] = .{ .name = "ARRAYLENGTH" };
-
-    // CHECKCAST + null-check branches
-    t[0xC0] = .{ .name = "CHECKCAST", .operands = 2 };
-    t[0xC6] = .{ .name = "IFNULL", .operands = 2 };
-    t[0xC7] = .{ .name = "IFNONNULL", .operands = 2 };
-
-    // Switches — variable length (caller inspects payload)
-    t[0xCC] = .{ .name = "LOOKUPSWITCH", .operands = -1 };
-    t[0xCD] = .{ .name = "TABLESWITCH", .operands = -1 };
-
-    // Extended LOAD/STORE and strings
-    t[0xD0] = .{ .name = "LDC_STRING", .operands = 2 };
-    t[0xD5] = .{ .name = "LOAD_op", .operands = 1 };
-    t[0xD6] = .{ .name = "STORE_op", .operands = 1 };
-    t[0xD9] = .{ .name = "ALOAD_0_DUP" };
-    t[0xDA] = .{ .name = "STORE_0" };
-    t[0xDB] = .{ .name = "LLOAD_0" };
-    t[0xDC] = .{ .name = "LSTORE_0" };
-    t[0xDD] = .{ .name = "LOAD_1" };
-    t[0xDE] = .{ .name = "STORE_1" };
-    t[0xDF] = .{ .name = "LLOAD_1" };
-    t[0xE0] = .{ .name = "LSTORE_1" };
-    t[0xE1] = .{ .name = "LOAD_2" };
-    t[0xE2] = .{ .name = "STORE_2" };
-    t[0xE3] = .{ .name = "LLOAD_2" };
-    t[0xE4] = .{ .name = "LSTORE_2" };
-    t[0xE5] = .{ .name = "LOAD_3" };
-    t[0xE6] = .{ .name = "STORE_3" };
-    t[0xE7] = .{ .name = "LLOAD_3" };
-    t[0xE8] = .{ .name = "LSTORE_3" };
-    t[0xE9] = .{ .name = "IRETURN" };
-    t[0xEA] = .{ .name = "LRETURN" };
-
-    // Method invocation — 2-byte descriptor offset
-    t[0xED] = .{ .name = "INVOKEVIRTUAL_ALT", .operands = 2 };
-    t[0xEE] = .{ .name = "INVOKEVIRTUAL", .operands = 2 };
-    t[0xEF] = .{ .name = "INVOKE_OWN", .operands = 2 };
-    t[0xF0] = .{ .name = "INVOKESPECIAL", .operands = 2 };
-    t[0xF1] = .{ .name = "INVOKESTATIC_ALT", .operands = 2 };
-    t[0xF2] = .{ .name = "INVOKESTATIC", .operands = 2 };
-
-    // Field access — 2-byte descriptor offset
-    t[0xF3] = .{ .name = "GETSTATIC", .operands = 2 };
-    t[0xF4] = .{ .name = "PUTSTATIC", .operands = 2 };
-    t[0xF5] = .{ .name = "GETFIELD_OWN", .operands = 2 };
-    t[0xF6] = .{ .name = "PUTFIELD_OWN", .operands = 2 };
-    t[0xF7] = .{ .name = "GETSTATIC_FULL", .operands = 2 };
-    t[0xF8] = .{ .name = "PUTSTATIC_FULL", .operands = 2 };
-    t[0xF9] = .{ .name = "GETFIELD", .operands = 2 };
-    t[0xFA] = .{ .name = "PUTFIELD", .operands = 2 };
-
-    break :blk t;
-};
-
-/// Return the opcode mnemonic (e.g. "INVOKEVIRTUAL"). Falls back to
-/// `"OP_??"` for unbound slots.
-pub fn opName(op: u8) []const u8 {
-    return opcodes[op].name;
-}
 
 /// Class hash → human name. Returns `null` for unknown classes (the
 /// caller should fall back to the raw hex hash). All 54 built-in 4CVP
@@ -363,6 +185,10 @@ pub fn methodName(class_hash: u32, method_hash: u32) ?[]const u8 {
         // ── exen.FX (0xd8f81132) ───────────────────────────────────────
         0xd8f811322d3e3675 => "FX.doRotozoomImage",      // idx 103, sub_424B70: rotozoom blit (image, gfx, x, y, angle, scale)
         0xd8f81132a845a8fd => "FX.doVerticalShutter",    // idx 107, sub_424E40: vertical-shutter blit (verified via Spyro trace)
+        0xd8f81132b29f3baa => "FX.doMosaic",             // idx 104, sub_424BFD → kernel sub_415FC6: pixelation, step 16 = 1:1
+        0xd8f81132fe4fe802 => "FX.doShiftHorizontal",    // idx 105, sub_424C84 → kernel sub_41688D: per-row shift-table displacement
+        0xd8f81132fe4fdabe => "FX.doShiftVertical",      // idx 106, sub_424D62 → kernel sub_416B75: per-column shift-table displacement
+        0xd8f81132a845d499 => "FX.doHorizontalShutter",  // idx 108, sub_424ED2 → kernel sub_416715: 8-row venetian blinds
 
         // ── exen.AnimBitmap (0xe7167d52) ───────────────────────────────
         0xe7167d523526a6fc => "AnimBitmap.draw",         // idx 43, sub_42469C: per-frame sprite blit via sub_4243D0 rect lookup
@@ -392,6 +218,19 @@ pub fn methodName(class_hash: u32, method_hash: u32) ?[]const u8 {
         0x6bddc5b766ffc4af => "Sms.readBits",     // idx 93, sub_429AC0: bit-stream read
         0x6bddc5b77c081dfe => "Sms.writeBits",    // idx 94, sub_429B0A: bit-stream write
         0x6bddc5b7d724894d => "Sms.endBlock",     // idx 95, sub_429B8D: compute payload bit-length, write back to count slot, return length
+        // idx 96-100 hashes read from the builtin Sms record in
+        // unk_4494F0.bin (method-info hash + native idx at body_offset);
+        // 96-99 names from the verified positional region. idx 100 name
+        // is behavioral (no strings-region name): canonical sub_429E0A
+        // returns a String "<tariff> Euro(s)" — the premium-SMS price
+        // line (tariff from dword_45FE8C[7*slot+106], label at
+        // VMstate+360); consumed by the shared vendor persistence class
+        // (method 0xd045f3c1 in Spyro/Crash) as "(0.31 Euro(s))\n".
+        0x6bddc5b73f52dee2 => "Sms.nextBlock",       // idx 96, sub_429C43
+        0x6bddc5b7d7244d63 => "Sms.getIdBlock",      // idx 97, sub_429CB0
+        0x6bddc5b7d7247e90 => "Sms.getLengthBlock",  // idx 98, sub_429D2A
+        0x6bddc5b7305a7b39 => "Sms.skipBits",        // idx 99, sub_429D86
+        0x6bddc5b7b2ba469c => "Sms.getPrice",        // idx 100, sub_429E0A (behavioral name)
 
         // ── exen.PlayField (0x7219d0b4) — tile-grid cell ops + composite ─
         0x7219d0b4603f215f => "PlayField.fillCells",       // idx 46, sub_427013: rect-fill cells with tile, bounds-clamped
@@ -414,6 +253,60 @@ pub fn methodName(class_hash: u32, method_hash: u32) ?[]const u8 {
         // ── exen.Vector3D (0xe36f9667) ─────────────────────────────────
         0xe36f9667d72430ea => "Vector3D.squareLength",   // idx 129, sub_42A020: (x>>8)² + (y>>8)² + (z>>8)²
         0xe36f9667d724ffd6 => "Vector3D.length",         // idx 130, sub_42A074: sqrt(x²+y²+z²) via sub_41CEFA, -5→-1
+        0xe36f9667d724a1ce => "Vector3D.normalise",      // idx 131, sub_42A0C8: scale to unit length, push status (-5→-1)
+        0xe36f96679cd66010 => "Vector3D.sum",            // idx 132, sub_42A132: this += other (componentwise)
+        0xe36f96679cd657fe => "Vector3D.minus",          // idx 133, sub_42A1AD: this -= other
+        0xe36f966774a08c21 => "Vector3D.dot",            // idx 134, sub_42A228: Σ (a>>8)*(b>>8)
+        0xe36f96679cd6a7a1 => "Vector3D.crossProduct",   // idx 135, sub_42A28A: cross into this, >>8 products
+        0xe36f9667305a2351 => "Vector3D.multiply",       // idx 136, sub_42A305: scalar multiply (⚠ name inferred)
+
+        // ── exen.AnimFlash (0xd414954a) — vestigial in canonical: no native
+        // playback (per-frame work is bytecode); subs are no-ops/constants ─
+        0xd414954a871a673c => "AnimFlash.initAnimFlash", // idx 54, sub_4248B0: push constant 0
+        0xd414954a4588a6fc => "AnimFlash.draw",          // idx 55, sub_4248C2: VOID no-op
+        0xd414954a3f5289a5 => "AnimFlash.delete",        // idx 56, sub_4248CA: void no-op
+        0xd414954a305ad830 => "AnimFlash.setFrame",      // idx 57, sub_4248D2: void no-op
+        0xd414954ad7243512 => "AnimFlash.getNbFrames",   // idx 58, sub_4248DA: push constant 1
+        0xd414954ad724f5c4 => "AnimFlash.getNbLoops",    // idx 59, sub_4248EC: push constant 0
+        0xd414954abc1d8740 => "AnimFlash.setPosition",   // idx 60, sub_4248FE: void no-op
+        0xd414954abc1d31ef => "AnimFlash.setSize",       // idx 61, sub_424906: void no-op
+        0xd414954a3526a6fc => "AnimFlash.getRawFrames",  // idx 62, sub_42490E: VOID no-op (argc=5!)
+        0xd414954ad82c89f7 => "AnimFlash.getWidth",      // idx 63, sub_424916: push field +36 (0xd0426be6)
+        0xd414954ad82c5f6d => "AnimFlash.getHeight",     // idx 64, sub_42492A: push field +40 (0xd0425e87)
+
+        // ── exen.Matrix3D (0x8f9e8280) — 4×4 Q16.16 row-major, int[16] in field 0x1822f276 ─
+        0x8f9e828046ca2f89 => "Matrix3D.copyFrom",       // idx 123, sub_426B20: copy 16 ints (null src → zero-fill)
+        0x8f9e8280305a66f1 => "Matrix3D.rotX",           // idx 124, sub_426B89 → sub_41D25B rotation overwrite
+        0x8f9e8280305a7778 => "Matrix3D.rotY",           // idx 125, sub_426BE3 → sub_41D2C4
+        0x8f9e8280305a45e3 => "Matrix3D.rotZ",           // idx 126, sub_426C3D → sub_41D32E
+        0x8f9e82806512b8f5 => "Matrix3D.multiply",       // idx 127, sub_426C97 → sub_41D396 4×4 matmul (⚠ name inferred)
+        0x8f9e82802b45b8f5 => "Matrix3D.transform",      // idx 128, sub_426D7B → sub_41D17B mat×vec into dst (⚠ name inferred)
+
+        // ── exen.RayCast (0xd0b8e4ac) — Wolfenstein raycaster; see docs/raycast_engine.md ─
+        0xd0b8e4ac6b07a6fc => "RayCast.draw",                  // idx 137, sub_4284C9 → sub_41F4DB full-frame render
+        0xd0b8e4ac546b12ea => "RayCast.isThereAWall",          // idx 138, sub_428683 → sub_41F5B9 walkability
+        0xd0b8e4ac625c3542 => "RayCast.addMonster",            // idx 139, sub_4286C9 → sub_42022A activate sprite
+        0xd0b8e4acd724dc6a => "RayCast.findFirstSpriteFreeID",  // idx 140, sub_428716 → sub_4201BF
+        0xd0b8e4ac305a9e99 => "RayCast.removeSprite",          // idx 141, sub_42874B → sub_4202C9
+        0xd0b8e4accf20d2c7 => "RayCast.moveSprite",            // idx 142, sub_42877A → sub_420511
+        0xd0b8e4acc342e202 => "RayCast.setSpritePos",          // idx 143, sub_4287BE → sub_420302
+        0xd0b8e4ac8a2a3357 => "RayCast.setSpriteSize",         // idx 144, sub_4288D3 → sub_420412
+        0xd0b8e4ac88e671af => "RayCast.changeInternalValues",  // idx 145, sub_428910 → sub_41F0DA config
+        0xd0b8e4ac729e78f8 => "RayCast.castRay",               // idx 146, sub_428962 single ray → int[6]
+
+        // ── vm.sys.Runtime (0xb4f0ccbf) ─────────────────────────────────
+        0xb4f0ccbf3f528978 => "Runtime.gc",              // idx 175, sub_42B2A0 → sub_40A30B collector sweep
+        0xb4f0ccbf229b6695 => "Runtime.createTempClass", // idx 176, sub_42B2AD: validate (obj, idx), pushes constant 0
+        0xb4f0ccbfd724a13d => "Runtime.getTickCount",    // idx 177, sub_42B338: ms tick, ONE int slot
+
+        // ── catalog.Catalog (0xbbd967f9) + GameProperty native ──────────
+        0xbbd967f97291113f => "Catalog.doesGameExist",       // idx 178, sub_4240A0 → sub_423BD0 record+fingerprint check
+        0xbbd967f97291b2a7 => "Catalog.launchGameIfPresent", // idx 179, sub_4240E1: launcher state 5 → app-FSM launch
+        0xbbd967f9f53e0494 => "Catalog.isUserRegistred",     // idx 180, sub_424178 → sub_423B7F reg-token OR (boot default 1)
+        0xbbd967f9b8fd5108 => "Catalog.downloadGame",        // idx 181, sub_424194: launcher state 6 download flow
+        0xbbd967f9f33ed04e => "Catalog.doEditBox",           // idx 182, sub_4242B2 → sub_403D8A host text input, result → dialog+16
+        0xbbd967f91b487d9d => "Catalog.atoi",                // idx 183, sub_424375 → sub_422AD2 decimal parse, -1 invalid
+        0xdd22a4ed3f52bcb7 => "GameProperty.<native>",       // idx 184, sub_4243C0: literal no-op
 
         // ── exen.Graphics (0xc6ed8e2a) — all 15 natives idx 0..14 ──────
         0xc6ed8e2acf201fef => "Graphics.clearRect",      // idx 0,  sub_425C73 → fill with palette[255]
@@ -736,234 +629,30 @@ pub fn fieldName(class_hash: u32, field_hash: u32) ?[]const u8 {
 }
 
 
-/// Full table of native indices (0..184) → name. Generated by
-/// `tools/extract_table.zig` from `assets/unk_4494F0.bin` — each
-/// native method's `body_offset` in the .bin points to a u32 that IS
-/// its `funcs_407AA2[]` index. The names here are the canonical labels
-/// from the .bin's strings region; where the strings region didn't
-/// pair a name (inherited methods or class-internal helpers), we fall
-/// back to alternate-class lookup by hash, and finally to `?N`
-/// placeholders for hashes that aren't named in any class.
-///
-/// Re-run `zig run tools/extract_table.zig` to regenerate. The
-/// regenerator catches >100 mislabelings the prior hand-curated table
-/// had — see `docs/extracted/<class>.md` for per-class details.
-pub const native_names: [185][]const u8 = .{
-    "Graphics.clearRect",
-    "Graphics.drawImage",
-    "Graphics.drawLine",
-    "Graphics.drawTriangle",
-    "Graphics.drawRect",
-    "Graphics.drawChars",
-    "Graphics.fillTriangle",
-    "Graphics.fillRect",
-    "Graphics.fillTextureTriangle",
-    // Graphics natives 9..14 — labels match canonical sub bodies (the
-    // .bin's positional pairing had setColor/setColorIndex/setPaintMode
-    // shifted from setInverseVideo/setNormalVideo/setColor; we use the
-    // behavioral names that match our handlers and the actual sub_*).
-    "Graphics.setPixel",
-    "Graphics.getPixel",
-    "Graphics.setClip",
-    "Graphics.setInverseVideo",
-    "Graphics.setNormalVideo",
-    "Graphics.setColor",
-    // Image natives 15..29 — labels aligned with canonical sub bodies
-    // (matches the rebound handlers in natives/exen/Image.zig). The
-    // .bin's positional name-pairing drifted in this range; the labels
-    // here describe what the sub at funcs_407AA2[N] actually does.
-    "Image.updateNativePaletteFromJavaPalette",
-    "Image.getNativePaletteSize",
-    "Image.updateJavaPaletteFromNativePalette",
-    "Image.setTransparentColor",
-    "Image.setPaletteAlpha",
-    "Image.getTransparentColor",
-    "Image.removeTransparentColor",
-    "Image.getSizeOfEXimgStruct",       // sub_426210 returns 88
-    "Image.getManufDisplayHeaderSize",  // sub_426222 returns sub_4022C4()
-    "Image.Init",                       // sub_4267F6 → sub_4176C7
-    "Image.?25",                        // sub_426589 unidentified
-    "Image.TransformBitmapFromResExed",
-    "Image.transformToSystemPalette",
-    "Image.TransformBlackAndWhiteBitmap",
-    "Image.decodeCodec",                // sub_426732 codec-pick decode
-    // Resource natives 30..42 — labels match canonical sub bodies.
-    // The .bin's positional pairing shifted by 2 here (it claimed 39 =
-    // getNbResources / 41 = getLength / 42 = readSound), but the sub
-    // bodies reveal 39 = readUTF, 41 = getNbResources, 42 = getResourceType.
-    "Resource.init",
-    "Resource.readBoolean",
-    "Resource.readInt",
-    "Resource.readShort",
-    "Resource.readByte",
-    "Resource.readChar",
-    "Resource.readBytes",
-    "Resource.readShorts",
-    "Resource.readInts",
-    "Resource.readUTF",          // sub_429265 walks 0xFF delimiters
-    "Resource.readString",       // sub_4295DF returns Nth string
-    "Resource.getNbResources",   // sub_4297FA returns count
-    "Resource.getResourceType",  // sub_429813 returns type byte
-    "AnimBitmap.draw",
-    "AnimBitmap.moduloFrame",
-    "AnimBitmap.getRealFrame",
-    "PlayField.fillCells",
-    "PlayField.moveTiles",
-    "PlayField.draw",
-    "PlayField.setCellTile",
-    "PlayField.getCellTile",
-    "PlayField.addSprite",
-    "PlayField.removeSprite",
-    "PlayField.removeAllSprite",
-    "AnimFlash.initAnimFlash",
-    "AnimFlash.draw",
-    "AnimFlash.delete",
-    "AnimFlash.setFrame",
-    "AnimFlash.getNbFrames",
-    "AnimFlash.getNbLoops",
-    "AnimFlash.setPosition",
-    "AnimFlash.setSize",
-    "AnimFlash.getRawFrames",
-    "AnimFlash.getWidth",  // hash 0xd82c89f7 unnamed in AnimFlash, found as AnimBitmap.getWidth
-    "AnimFlash.getHeight",  // hash 0xd82c5f6d unnamed in AnimFlash, found as AnimBitmap.getHeight
-    "Displayable.?65",  // no name anywhere for hash 0xf53edf41
-    "Displayable.drawText",  // idx 66, sub_424A9D: (graphics, char[], color) — saves clip, blits text via sub_4238F0, restores clip
-    "Gamelet.getBitmapDepth",
-    "Gamelet.getScreenWidth",
-    "Gamelet.getScreenHeight",
-    "Gamelet.screenUpdate",
-    "Gamelet.exitVm",
-    // The .bin labels idx 72 as "exit", but the canonical sub_424FF2 body
-    // resolves a2+28 to a descriptor and calls sub_402304 — that's a
-    // device-level FRAME FLUSH, not VM termination. Terminator's
-    // playMelody routinely calls this hash as part of its tick loop.
-    "Gamelet.screenUpdate",   // idx 72 sub_424FF2 — descriptor lookup + flush via sub_402304
-    "Gamelet.exitVm",          // idx 73 sub_424FD2 — argc=0 stop-audio + reset-device + flag=1
-    "Gamelet.throwInternalException", // idx 74 sub_410198 — argc=1 error code halt
-    "Gamelet.stopTimer",
-    "Gamelet.sendSms",
-    "Gamelet.saveCtx",
-    "Gamelet.loadCtx",
-    "Gamelet.repaint",
-    "Gamelet.update",
-    "Gamelet.playVibrator",  // idx 81 sub_4253BC: if(device_has_vibrator) sub_434189(1000) — paired via strings region row 60 (argc=0 → void) + canonical body "ExManufVibrati" debug string
-    "Gamelet.getNickName",
-    "Gamelet.setNickName",
-    "Gamelet.getVersionInfo",
-    "Gamelet.getKeyCode",
-    "Gamelet.getGameAction",
-    "Gamelet.?87",  // no name anywhere for hash 0x8a09c398
-    "Gamelet.?88",  // no name anywhere for hash 0x39524bcf
-    "Sms.deleteSms",
-    "Sms.createSms",
-    "Sms.createSms",
-    "Sms.createBlock",
-    "Sms.readBits",
-    "Sms.writeBits",
-    "Sms.endBlock",
-    "Sms.nextBlock",
-    "Sms.getIdBlock",
-    "Sms.getLengthBlock",
-    "Sms.skipBits",
-    "Sms.?100",  // no name anywhere for hash 0xb2ba469c
-    "DialogBox.drawSprite",
-    "DialogBox.?102",  // no name anywhere for hash 0x5fd77824
-    "FX.doRotazoom",
-    "FX.doMosaic",
-    "FX.doShiftHorizontal",
-    "FX.doShiftVertical",
-    "FX.doShutterVertical",
-    "FX.doShutterHorizontal",
-    "List.drawList",
-    "Math.sin",
-    "Math.cos",
-    "Math.getAngle",
-    "Math.setSinusPeriod",
-    "Math.getSinusPeriod",
-    "Math.getSinOfPeriod",
-    "Math.getCosOfPeriod",
-    "Math.getCosPeriodPrecise",
-    "Math.getSinPeriodPrecise",
-    "Math.abs",
-    "Math.setRandSeed",
-    "Math.random",
-    "Math.sqrt",
-    "Matrix3D.copyFrom",
-    "Matrix3D.rotX",
-    "Matrix3D.rotY",
-    "Matrix3D.rotZ",
-    "Matrix3D.?127",  // no name anywhere for hash 0x6512b8f5
-    "Matrix3D.?128",  // no name anywhere for hash 0x2b45b8f5
-    "Vector3D.squareLength",
-    "Vector3D.length",
-    "Vector3D.normalise",
-    "Vector3D.sum",
-    "Vector3D.minus",
-    "Vector3D.dot",
-    "Vector3D.crossProduct",
-    "Vector3D.?136",  // no name anywhere for hash 0x305a2351
-    "RayCast.draw",
-    "RayCast.isThereAWall",
-    "RayCast.addMonster_internal",
-    "RayCast.findFirstSpriteFreeID",
-    "RayCast.removeSprite",
-    "RayCast.moveSprite",
-    "RayCast.setSpritePos",
-    "RayCast.setSpriteSize",
-    "RayCast.changeInternalValues_internal",
-    "RayCast.castRay",
-    "Debug.DisplayText",
-    "Debug.WaitForKey",
-    "Debug.DisplayMemoryBlocks",
-    "Debug.printInt",  // hash 0x305aa2f2, idx 150 (sub_429FC2)
-    "Object.hashCode",
-    "Object.equals",
-    "Object.?153",  // no name anywhere for hash 0xd5710643
-    "Object.?154",  // no name anywhere for hash 0xdf3ed63a
-    "Class.?155",  // no name anywhere for hash 0x70063066
-    "Class.?156",  // no name anywhere for hash 0xd5710176
-    "Class.?157",  // no name anywhere for hash 0xb2babd25
-    "String.toCharArray",
-    "String.getBytes",
-    "String.equals",
-    "String.append",
-    "String.?162",  // no name anywhere for hash 0xf33e22cb
-    "String.?163",  // no name anywhere for hash 0x35b022cb
-    "String.?164",  // no name anywhere for hash 0x6f6c22cb
-    "String.?165",  // no name anywhere for hash 0xd045a46b
-    "StringBuffer.initStringBuffer",
-    "StringBuffer.length",  // idx 167 sub_42B17D: *a1 = *(u16*)(this[+24])
-    "StringBuffer.?168",  // no name anywhere for hash 0xd7242d63
-    "StringBuffer.?169",  // no name anywhere for hash 0x5afc22cb
-    "StringBuffer.?170",  // no name anywhere for hash 0x314322cb
-    "StringBuffer.?171",  // no name anywhere for hash 0x984422cb
-    "StringBuffer.?172",  // no name anywhere for hash 0x501322cb
-    "StringBuffer.?173",  // no name anywhere for hash 0x0ff222cb
-    "StringBuffer.append",  // hash 0xb2ba3939 unnamed in StringBuffer, found as String.append
-    "Runtime.?175",  // no name anywhere for hash 0x3f528978
-    "Runtime.?176",  // no name anywhere for hash 0x229b6695
-    "Runtime.?177",  // no name anywhere for hash 0xd724a13d
-    "Catalog.doesGameExist",
-    "Catalog.launchGameIfPresent",
-    "Catalog.isUserRegistred",
-    "Catalog.downloadGame",
-    "Catalog.doEditBox",
-    "Catalog.atoi",
-    "GameProperty.?184",  // no name anywhere for hash 0x3f52bcb7
-};
+/// idx → "Class.method" table, INJECTED at boot by the frontend from
+/// `natives.native_names` (see `exen.setNativeNames`) — that table is
+/// derived at comptime from the same `entries` tuples that build each
+/// class's dispatcher, so it can't drift from dispatch truth. Core
+/// cannot import the natives module (dependency cycle), hence the
+/// injection, mirroring `setNativeDispatcher`. Empty until injected;
+/// `nativeName` then returns "?".
+pub var native_name_table: []const []const u8 = &.{};
+
+pub fn setNativeNames(table: []const []const u8) void {
+    native_name_table = table;
+}
 
 
 pub fn nativeName(idx: u32) []const u8 {
-    if (idx < native_names.len) return native_names[idx];
-    return "?";
+    return if (idx < native_name_table.len) native_name_table[idx] else "?";
 }
 
 /// `funcs_407AA2[N]` → canonical `sub_*` address in `reference/ref`.
 /// This is the AUTHORITATIVE identifier for what a native invocation
 /// actually runs: read the matching `sub_*` body in ref to see
-/// the canonical implementation. Unlike `native_names[]` (which comes
-/// from positional name-pairing and can drift), the sub address is the
-/// real ABI of the runtime. Regenerated by `tools/extract_table.zig`.
+/// the canonical implementation. The sub address is the real ABI of
+/// the runtime (human names can drift; this can't). Regenerated by
+/// `tools/extract_table.zig`.
 pub const native_sub_names: [185][]const u8 = .{
     "sub_425C73",
     "sub_425699",
@@ -1155,16 +844,4 @@ pub const native_sub_names: [185][]const u8 = .{
 pub fn nativeSubName(idx: u32) []const u8 {
     if (idx < native_sub_names.len) return native_sub_names[idx];
     return "?";
-}
-
-/// Build a structural label for a (class_hash, method_hash) pair.
-/// Unlike `methodName` (which guesses via positional name-pairing and
-/// often gets it wrong), this returns only what's STRUCTURALLY derivable
-/// from the method's row in its class's method_table. Never guesses
-/// a name; callers can resolve to a human name via
-/// `docs/extracted/<class>.md` if they really want.
-///
-/// Returns the buffer slice. Caller provides at least 64 bytes.
-pub fn methodLabel(class_hash: u32, method_hash: u32, buf: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "0x{x:0>8}#hash=0x{x:0>8}", .{ class_hash, method_hash }) catch "?";
 }

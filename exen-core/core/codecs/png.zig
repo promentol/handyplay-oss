@@ -85,6 +85,7 @@ pub const Decoded = struct {
     width: u32,
     height: u32,
     pixels: []u32, // ABGR8888 (LE byte order R G B A)
+    indices: []u8 = &.{}, // one source palette index per pixel
 };
 
 /// Decode a PNG section (at `sig_off`) into an ABGR8888 pixel buffer.
@@ -116,8 +117,14 @@ pub fn decodePngToAbgr(allocator: std.mem.Allocator, buf: []const u8, sig_off: u
     const bytes_per_row: usize = (@as(usize, info.width) * info.bit_depth + 7) / 8;
     if (raw.len < bytes_per_row * info.height) return error.IdatTooShort;
 
-    const pixels = try allocator.alloc(u32, @as(usize, info.width) * info.height);
+    const npix = @as(usize, info.width) * info.height;
+    const pixels = try allocator.alloc(u32, npix);
     errdefer allocator.free(pixels);
+    // Per-pixel source palette index — retained so index-based transparency
+    // (Image.setTransparentColor / setPaletteAlpha → Graphics.drawImage /
+    // AnimBitmap.draw) can skip the transparent index on PNG-decoded images.
+    const indices = try allocator.alloc(u8, npix);
+    errdefer allocator.free(indices);
 
     var y: u32 = 0;
     while (y < info.height) : (y += 1) {
@@ -128,13 +135,11 @@ pub fn decodePngToAbgr(allocator: std.mem.Allocator, buf: []const u8, sig_off: u
                 raw[row_off + x]
             else // 4bpp: 2 nibbles per byte, high nibble first
                 (raw[row_off + x / 2] >> (4 - 4 * @as(u3, @intCast(x & 1)))) & 0x0F;
+            indices[@as(usize, y) * info.width + x] = ix;
             const p_off = @as(usize, ix) * 3;
             const r: u32 = if (p_off + 2 < plte.len) plte[p_off] else 0;
             const g: u32 = if (p_off + 2 < plte.len) plte[p_off + 1] else 0;
             const b: u32 = if (p_off + 2 < plte.len) plte[p_off + 2] else 0;
-            // Alpha from tRNS chunk if present (one byte per palette
-            // entry, missing entries default to opaque). Without tRNS
-            // we treat every pixel as opaque.
             const a: u32 = if (info.trns) |trns|
                 (if (ix < trns.len) @as(u32, trns[ix]) else 0xFF)
             else
@@ -143,7 +148,7 @@ pub fn decodePngToAbgr(allocator: std.mem.Allocator, buf: []const u8, sig_off: u
         }
     }
 
-    return .{ .width = info.width, .height = info.height, .pixels = pixels };
+    return .{ .width = info.width, .height = info.height, .pixels = pixels, .indices = indices };
 }
 
 /// Port of sub_432A76 in ref (ExEn LZSS-variant for IDAT codec 5).

@@ -13,6 +13,7 @@ const bridge = core.bridge;
 const Vm = interp.Vm;
 const Handle = bridge.Handle;
 
+pub const class_name: []const u8 = "Graphics";
 pub const first_index: u32 = 0;
 pub const last_index: u32 = 14;
 
@@ -39,12 +40,23 @@ const FIELD_CLIP_Y_CANON: u32 = 0xC1C1_5079;
 const FIELD_CLIP_W_CANON: u32 = 0xC1C1_507A;
 const FIELD_CLIP_H_CANON: u32 = 0xC1C1_507B;
 
+/// Convert a stored 0x00RRGGBB pen value into the framebuffer's ABGR8888
+/// byte order (R low, B high). Without this swap, asymmetric colours come
+/// out R/B-transposed — e.g. yellow (0xFFFF00) renders as cyan. (Symmetric
+/// colours like magenta/greys hid the bug.)
+fn rgbToAbgr(rgb: u32) u32 {
+    const r = (rgb >> 16) & 0xFF;
+    const g = (rgb >> 8) & 0xFF;
+    const b = rgb & 0xFF;
+    return 0xFF000000 | (b << 16) | (g << 8) | r;
+}
+
 /// Resolve the current pen colour for a Graphics handle. Defaults to
 /// opaque black when the field hasn't been set yet.
 fn penColor(vm: *Vm, this: Handle) u32 {
     const rgb = _h.instField(vm, this, FIELD_PEN_COLOR);
     return if ((rgb & 0x01000000) != 0)
-        0xFF000000 | (rgb & 0x00FFFFFF)
+        rgbToAbgr(rgb & 0x00FFFFFF)
     else
         0xFF000000;
 }
@@ -187,7 +199,6 @@ fn drawImage(vm: *Vm, args: bridge.ArgFrame) i16 {
         }
     }
 
-    var painted: u32 = 0;
     if (sw == dw and sh == dh) {
         // Unscaled — vtable[52], mode-aware
         const flip_x = (mode == 2 or mode == 1 or mode == 4 or mode == 7);
@@ -226,7 +237,6 @@ fn drawImage(vm: *Vm, args: bridge.ArgFrame) i16 {
                 }
                 const dst_idx = @as(usize, @intCast(py)) * target.width + @as(usize, @intCast(px_x));
                 target.pixels[dst_idx] = p;
-                painted += 1;
             }
         }
     } else {
@@ -260,17 +270,8 @@ fn drawImage(vm: *Vm, args: bridge.ArgFrame) i16 {
                 }
                 const dst_idx = @as(usize, @intCast(py)) * target.width + @as(usize, @intCast(px_x));
                 target.pixels[dst_idx] = p;
-                painted += 1;
             }
         }
-    }
-    // SPAWN-DEBUG: flag draws that land off-screen (likely an enemy stuck
-    // at an off-track position) — INFO so it's grep-able. dx>=target.width
-    // or fully clipped → painted 0 despite a non-empty source.
-    if (painted == 0 and inst.pix_w > 0 and inst.pix_h > 0) {
-        std.log.scoped(.drawdbg).info("OFFSCREEN img=0x{x:0>8} dst=({d},{d}) dsz=({d}x{d}) src=({d},{d},{d}x{d})", .{
-            image, dx, dy, dw, dh, sx, sy, sw, sh,
-        });
     }
     return 0;
 }
@@ -315,7 +316,7 @@ fn drawChars(vm: *Vm, args: bridge.ArgFrame) i16 {
 
     const color_rgb = _h.instField(vm, this, FIELD_PEN_COLOR);
     const color: u32 = if ((color_rgb & 0x01000000) != 0)
-        0xFF000000 | (color_rgb & 0x00FFFFFF)
+        rgbToAbgr(color_rgb & 0x00FFFFFF)
     else
         0xFFFFFFFF;
     const target_dt = _h.graphicsTarget(vm, this) orelse return 0;
@@ -405,7 +406,7 @@ fn setPixel(vm: *Vm, args: bridge.ArgFrame) i16 {
     const y = args.getI32(2);
     const color_byte = args.getU32(3);
     const t = _h.graphicsTarget(vm, this) orelse return 0;
-    const color: u32 = 0xFF000000 | (color_byte & 0x00FFFFFF);
+    const color: u32 = rgbToAbgr(color_byte & 0x00FFFFFF);
     _h.setPixelInTarget(t, x, y, color);
     return 0;
 }
@@ -481,20 +482,22 @@ fn setColor(vm: *Vm, args: bridge.ArgFrame) i16 {
     return 0;
 }
 
-pub const handle = bridge.canonical(.{
-    .{ 0,  "clearRect",            clearRect },
-    .{ 1,  "drawImage",            drawImage },
-    .{ 2,  "drawLine",             drawLine },
-    .{ 3,  "drawTriangle",         drawTriangle },
-    .{ 4,  "drawRect",             drawRect },
-    .{ 5,  "drawChars",            drawChars },
-    .{ 6,  "fillTriangle",         fillTriangle },
-    .{ 7,  "fillRect",             fillRect },
-    .{ 8,  "fillTextureTriangle",  fillTextureTriangle },
-    .{ 9,  "setPixel",             setPixel },
-    .{ 10, "getPixel",             getPixel },
-    .{ 11, "setClip",              setClip },
-    .{ 12, "setInverseVideo",      setInverseVideo },
-    .{ 13, "setNormalVideo",       setNormalVideo },
-    .{ 14, "setColor",             setColor },
-});
+pub const entries = .{
+    .{ 0,  "clearRect",           clearRect },
+    .{ 1,  "drawImage",           drawImage },
+    .{ 2,  "drawLine",            drawLine },
+    .{ 3,  "drawTriangle",        drawTriangle },
+    .{ 4,  "drawRect",            drawRect },
+    .{ 5,  "drawChars",           drawChars },
+    .{ 6,  "fillTriangle",        fillTriangle },
+    .{ 7,  "fillRect",            fillRect },
+    .{ 8,  "fillTextureTriangle", fillTextureTriangle },
+    .{ 9,  "setPixel",            setPixel },
+    .{ 10, "getPixel",            getPixel },
+    .{ 11, "setClip",             setClip },
+    .{ 12, "setInverseVideo",     setInverseVideo },
+    .{ 13, "setNormalVideo",      setNormalVideo },
+    .{ 14, "setColor",            setColor },
+};
+
+pub const handle = bridge.canonical(entries);

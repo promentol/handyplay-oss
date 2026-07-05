@@ -32,6 +32,11 @@ pub const Frame = struct {
     /// caller's stack when invokeMethodInfo returns.
     ret_value: [2]u32 = .{ 0, 0 },
     ret_slots: u8 = 0,
+    /// Saved return PC for the JSR/RET subroutine pair. Canonical stores
+    /// this in the per-frame slot at `(VC+32)` (see JSR sub_40C8F0 /
+    /// RET sub_40F9E0). Single slot ⇒ non-nested subroutines only, which
+    /// matches the finally-clause pattern JSR/RET was emitted for.
+    jsr_ret_pc: u32 = 0,
 
     pub fn push(self: *Frame, value: u32) Error!void {
         if (self.sp >= self.slab.len) return Error.StackOverflow;

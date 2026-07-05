@@ -24,6 +24,7 @@ const bridge = core.bridge;
 
 const Vm = interp.Vm;
 
+pub const class_name: []const u8 = "Debug";
 pub const first_index: u32 = 147;
 pub const last_index: u32 = 150;
 
@@ -35,6 +36,19 @@ fn printInt(_: *Vm, args: bridge.ArgFrame) i16 {
     return 0;
 }
 
-pub const handle = bridge.canonical(.{
-    .{ 150, "Debug.printInt", printInt },
-});
+/// Known names for idxs in this class's range that have NO Zig handler
+/// yet (they hit `defaultNativeStub` at runtime). Consumed by
+/// `natives/mod.zig::native_names` for logs/tools; idxs in range but
+/// absent here AND in `entries` render as "Class.?N". When porting one
+/// of these, move the row into `entries` with its handler.
+pub const stub_names = .{
+    .{ 147, "DisplayText" },           // sub_429F40
+    .{ 148, "WaitForKey" },            // sub_429FB2
+    .{ 149, "DisplayMemoryBlocks" },   // sub_429FBA
+};
+
+pub const entries = .{
+    .{ 150, "printInt", printInt },
+};
+
+pub const handle = bridge.canonical(entries);

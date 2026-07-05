@@ -142,18 +142,12 @@ pub fn opNewarray(vm: *Vm, frame: *Frame, _: u8) Error!void {
     const handle = try vm.heap.alloc(0);
     const inst = vm.heap.get(handle) orelse return Error.NullPointer;
     inst.fields[0] = safe_len;
-    // Mirror low-byte storage into `.bytes` for any text-shaped array.
-    // ExEn allocates per-element by `1 << ((tag>>2) & 3)`, so:
-    //   elem_shift==0 → byte[] (tag 0x90)
-    //   elem_shift==1 → char[] (tag 0x55) — the gamelet uses these for
-    //                   menu strings, packing ASCII into the low byte
-    //                   of each 16-bit char.
-    // `Graphics.drawChars`, `String.getBytes`, and friends ultimately
-    // want a flat byte buffer; storing the low byte of each element in
-    // `.bytes` lets them treat both shapes uniformly. ARRSTORE already
-    // truncates value→u8 when mirroring, so no further fix is needed
-    // on the write path. (sub_40EE4D:12636 in reference/ref
-    // shows the canonical per-element-size formula.)
+    // Mirror low-byte storage into `.bytes` for byte/char/short arrays: 1 byte
+    // per element (`elem_shift <= 1`). SALOAD/CALOAD/BALOAD and ARRSTORE all
+    // read/write at this 1-byte stride, so byte/char/short arrays stay in sync.
+    // (A 2-byte short-stride was tried for canonical exactness but reverted —
+    // it desynced arrays that AoE etc. also touch at 1-byte stride, garbling
+    // layouts. Corpus short values fit in a byte.)
     const elem_shift: u32 = (type_tag >> 2) & 3;
     if (elem_shift <= 1 and safe_len > 0) {
         const buf = vm.heap.allocator.alloc(u8, safe_len) catch null;
@@ -271,6 +265,133 @@ pub fn opCaload(vm: *Vm, frame: *Frame, _: u8) Error!void {
     const slot = 1 + idx;
     const v: u32 = if (slot < inst.fields.len) inst.fields[slot] & 0xFF else 0;
     try frame.push(v);
+}
+
+/// SALOAD (opcode 0x35, canonical sub_40FA40) — load one short element,
+/// sign-extended 16→32. Canonical reads `*(__int16 *)(v1 + 20 + 2*v2)`, i.e.
+/// a signed 2-byte little-endian value at element offset `2*idx`.
+///
+/// Storage: 1 byte per element in `.bytes` (byte/char/short share this;
+/// so we read 2 bytes LE from `.bytes[2*idx]` and sign-extend. Char-compatible
+/// a 2-byte-stride model was reverted — see the note in the body).
+/// they never legitimately reach SALOAD, but if they do we read the packed
+/// byte rather than mis-striding. `.ints`/`fields` remain as last-resort
+/// fallbacks for arrays that were populated through another path.
+///
+/// (This opcode was originally bound to opIaload, whose `fields[1+idx]`
+/// fallback returns 0 past index 62 — the "BanjoKazooie enemies draw as 0×0"
+/// bug. It then read `.bytes` 1-byte unsigned, which truncated true shorts.)
+pub fn opSaload(vm: *Vm, frame: *Frame, _: u8) Error!void {
+    const idx = try frame.pop();
+    const ref = try frame.pop();
+    if (ref == 0) {
+        log.warn("  SALOAD on null array — pushing 0", .{});
+        try frame.push(0);
+        return;
+    }
+    const inst = vm.heap.get(ref) orelse {
+        log.warn("  SALOAD on invalid handle 0x{x:0>8} — pushing 0", .{ref});
+        try frame.push(0);
+        return;
+    };
+    // 1 byte per element (byte/char/short share this). A 2-byte-stride model
+    // was reverted: AoE & others read the same short arrays at 1-byte stride
+    // via CALOAD/ARRSTORE, so widening only SALOAD/SASTORE garbled layouts.
+    if (inst.bytes) |b| {
+        if (idx < b.len) {
+            try frame.push(@as(u32, b[idx]));
+            return;
+        }
+    }
+    if (inst.ints) |ix| {
+        if (idx < ix.len) {
+            try frame.push(ix[idx]);
+            return;
+        }
+    }
+    const slot = 1 + idx;
+    const v: u32 = if (slot < inst.fields.len) inst.fields[slot] else 0;
+    try frame.push(v);
+}
+
+/// SASTORE (opcode 0x56, canonical sub_40FB44) — store the low 16 bits of the
+/// value into a short element: `*(_WORD *)(v1 + 20 + 2*v3) = (u16)value`.
+/// Distinct from opArrStore (byte/int width): a short array carries
+/// 1 byte per element at `idx` (matches SALOAD/CALOAD/ARRSTORE; a 2-byte
+/// stride was tried and reverted because it desynced arrays other opcodes
+/// the ASCII text path is untouched.
+pub fn opSastore(vm: *Vm, frame: *Frame, _: u8) Error!void {
+    const v = try frame.pop();
+    const idx = try frame.pop();
+    const ref = try frame.pop();
+    if (ref == 0) {
+        log.warn("  SASTORE on null array — ignored", .{});
+        return;
+    }
+    const inst = vm.heap.get(ref) orelse return;
+    if (inst.bytes) |b| {
+        if (idx < b.len) b[idx] = @truncate(v);
+    }
+    if (inst.ints) |ix| {
+        if (idx < ix.len) ix[idx] = v;
+    }
+    const slot = 1 + idx;
+    if (slot < inst.fields.len) inst.fields[slot] = v;
+}
+
+/// LALOAD (opcode 0x2f, canonical sub_40CA2F) — load one long element.
+/// Long arrays are allocated by NEWARRAY into `.ints` with stride 2
+/// (see opNewarray: elem_shift == 3 → len*2 u32s), so element k occupies
+/// ints[2k] (lo) and ints[2k+1] (hi). Pushes lo then hi (2 slots).
+pub fn opLaload(vm: *Vm, frame: *Frame, _: u8) Error!void {
+    const idx = try frame.pop();
+    const ref = try frame.pop();
+    if (ref == 0) {
+        log.warn("  LALOAD on null array — pushing 0L", .{});
+        try frame.push(0);
+        try frame.push(0);
+        return;
+    }
+    const inst = vm.heap.get(ref) orelse {
+        log.warn("  LALOAD on invalid handle 0x{x:0>8} — pushing 0L", .{ref});
+        try frame.push(0);
+        try frame.push(0);
+        return;
+    };
+    var lo: u32 = 0;
+    var hi: u32 = 0;
+    if (inst.ints) |ix| {
+        const base = 2 * idx;
+        if (base + 1 < ix.len) {
+            lo = ix[base];
+            hi = ix[base + 1];
+        }
+    }
+    try frame.push(lo);
+    try frame.push(hi);
+}
+
+/// LASTORE (opcode 0x50, canonical sub_40CB8F) — store one long element.
+/// Pops ref, idx, and a 2-slot long value (4 slots total). Distinct from
+/// opArrStore, which pops only 3: binding LASTORE to opArrStore left the
+/// stack one slot high AND truncated the value to its low word.
+pub fn opLastore(vm: *Vm, frame: *Frame, _: u8) Error!void {
+    const hi = try frame.pop();
+    const lo = try frame.pop();
+    const idx = try frame.pop();
+    const ref = try frame.pop();
+    if (ref == 0) {
+        log.warn("  LASTORE on null array — ignored", .{});
+        return;
+    }
+    const inst = vm.heap.get(ref) orelse return;
+    if (inst.ints) |ix| {
+        const base = 2 * idx;
+        if (base + 1 < ix.len) {
+            ix[base] = lo;
+            ix[base + 1] = hi;
+        }
+    }
 }
 
 pub fn opArrStore(vm: *Vm, frame: *Frame, _: u8) Error!void {

@@ -13,6 +13,7 @@ const bridge = core.bridge;
 const Vm = interp.Vm;
 const Handle = bridge.Handle;
 
+pub const class_name: []const u8 = "Image";
 pub const first_index: u32 = 15;
 pub const last_index: u32 = 29;
 
@@ -225,12 +226,16 @@ fn init(vm: *Vm, args: bridge.ArgFrame) i16 {
     const buf_inst = vm.heap.get(buf_handle) orelse return 0;
     const have = if (buf_inst.bytes) |b| b.len else 0;
     if (have >= need) return 0;
-    const new_buf = vm.allocator.alloc(u8, need) catch return 0;
+    // The backing buffer is Instance-owned storage: NEWARRAY allocates it from
+    // the object heap, and freeInstance frees it there — so the resize must use
+    // vm.heap.allocator (NOT vm.allocator, the FBA VM arena, whose `free`
+    // asserts on pointers it doesn't own).
+    const new_buf = vm.heap.allocator.alloc(u8, need) catch return 0;
     @memset(new_buf, 0);
     const old = buf_inst.bytes;
     buf_inst.bytes = new_buf;
     buf_inst.fields[0] = @intCast(new_buf.len);
-    if (old) |o| vm.allocator.free(o);
+    if (old) |o| if (vm.heap.freeable(@intFromPtr(o.ptr), o.len)) vm.heap.allocator.free(o);
     return 0;
 }
 
@@ -257,10 +262,14 @@ fn transformBitmapFromResExed(vm: *Vm, args: bridge.ArgFrame) i16 {
     const res = _h.loadResource(vm, res_handle) orelse return 0;
     const image_inst = vm.heap.get(image_handle) orelse return 0;
 
-    // Free any old decoded raster owned by this Image.
+    // Free any old decoded raster / index buffers owned by this Image.
+    // Both are vm.allocator-owned (like pixels_owned) — free them the same
+    // way so per-frame re-decodes don't leak within the VM arena.
     if (image_inst.pixels_owned) |p| vm.allocator.free(p);
+    if (image_inst.pixel_indices) |p| vm.allocator.free(p);
     image_inst.pixels = null;
     image_inst.pixels_owned = null;
+    image_inst.pixel_indices = null;
 
     var img_state = core.exn.imageInit(image_inst.pix_w, image_inst.pix_h, 0);
     const ok = core.exn.decodeImageFromResource(&img_state, res, raw, vm.allocator) catch false;
@@ -268,6 +277,14 @@ fn transformBitmapFromResExed(vm: *Vm, args: bridge.ArgFrame) i16 {
         image_inst.pixels = img_state.pixels.?;
         image_inst.pixels_owned = img_state.pixels.?;
         img_state.pixels = null;
+        // Retain the source palette-index buffer so index-based transparency
+        // (setTransparentColor / setPaletteAlpha) can skip the transparent
+        // index on this PNG-decoded image — see Graphics.drawImage /
+        // AnimBitmap.draw.
+        if (img_state.indices) |ix| {
+            image_inst.pixel_indices = ix;
+            img_state.indices = null;
+        }
     }
     img_state.deinit(vm.allocator);
     return 0;
@@ -487,6 +504,8 @@ fn transformBitmapFromByteArray(vm: *Vm, args: bridge.ArgFrame) i16 {
     image_inst.pixels = null;
     image_inst.pixels_owned = null;
 
+    // Path 1 — PNG payload (auto-detected by signature): decode straight to
+    // ABGR pixels, like the sprite/resource path.
     var img_state = core.exn.imageInit(image_inst.pix_w, image_inst.pix_h, 0);
     const ok = core.exn.decodeImageFromBytes(&img_state, payload, vm.allocator) catch false;
     if (ok and img_state.pixels != null) {
@@ -497,8 +516,70 @@ fn transformBitmapFromByteArray(vm: *Vm, args: bridge.ArgFrame) i16 {
         image_inst.field_map.put(FIELD_WIDTH, img_state.width) catch {};
         image_inst.field_map.put(FIELD_HEIGHT, img_state.height) catch {};
         img_state.pixels = null;
+        img_state.deinit(vm.allocator);
+        return 0;
     }
     img_state.deinit(vm.allocator);
+
+    // Path 2 — raw ExEn codec bitstream (NOT PNG-wrapped). This is how
+    // bitmap FONTS are supplied (e.g. Pikubi2's 840×8 glyph atlas, an
+    // 8-bit indexed image compressed with codec 1). Canonical sub_4266A1 →
+    // sub_418D0A decodes the payload into the image's indexed buffer, then
+    // the palette (loaded via updateNativePaletteFromJavaPalette) + the
+    // transparent index (setPaletteAlpha) turn it into visible glyphs.
+    //
+    // The codec is selected by the high nibble of byte 0 — identical to the
+    // PNG-IDAT dispatch in png.decodePngToAbgr. We decode to indexed bytes,
+    // stash them in the pixel-buffer object, and clear `pixels` so the next
+    // drawImage runs doTransformToSystemPalette over them. Without this the
+    // atlas stayed all-zero and every glyph drew nothing → no on-screen text.
+    const codec_id: u8 = payload[0] >> 4;
+    const decoded: []u8 = switch (codec_id) {
+        1 => core.codec.decodeCodec1(vm.heap.allocator, payload) catch return 0,
+        2 => core.codec.decodeCodec2(vm.heap.allocator, payload) catch return 0,
+        3 => core.codec.decodeCodec3(vm.heap.allocator, payload) catch return 0,
+        4 => core.codec.decodeCodec4(vm.heap.allocator, payload) catch return 0,
+        else => return 0, // codec 5 (LZSS) lives in png.zig; no font uses it
+    };
+    const total: usize = @as(usize, image_inst.pix_w) * @as(usize, image_inst.pix_h);
+
+    // The codec output is either one index byte per pixel (`decoded.len ==
+    // total`), or — for 1-bit monochrome bitmap FONTS — a packed bitmap
+    // (`decoded.len * 8 ≈ total`, i.e. codec header `a == width * 1bpp`).
+    // The packed stream is row-major, MSB-first: pixel i is bit i of the
+    // stream. Expand to one index per pixel (0 = bg/transparent, 1 = glyph)
+    // so the palette + setPaletteAlpha path renders real glyphs instead of
+    // garbage / an all-zero atlas.
+    var indexed: []u8 = decoded;
+    if (total > 0 and decoded.len < total and decoded.len * 8 >= total) {
+        const exp = vm.heap.allocator.alloc(u8, total) catch {
+            vm.heap.allocator.free(decoded);
+            return 0;
+        };
+        var i: usize = 0;
+        while (i < total) : (i += 1) {
+            const byte = decoded[i >> 3];
+            exp[i] = (byte >> @intCast(7 - (i & 7))) & 1;
+        }
+        vm.heap.allocator.free(decoded);
+        indexed = exp;
+    }
+    const pbuf_h = image_inst.field_map.get(FIELD_PIXEL_BUFFER) orelse {
+        vm.heap.allocator.free(indexed);
+        return 0;
+    };
+    const pbuf = vm.heap.get(pbuf_h) orelse {
+        vm.heap.allocator.free(indexed);
+        return 0;
+    };
+    if (pbuf.bytes) |old| if (vm.heap.freeable(@intFromPtr(old.ptr), old.len)) vm.heap.allocator.free(old);
+    pbuf.bytes = indexed;
+    pbuf.fields[0] = @intCast(indexed.len);
+    // Not a composited render target — let the palette decode run.
+    image_inst.is_render_target = false;
+    if (image_inst.pixel_indices) |pi| if (vm.heap.freeable(@intFromPtr(pi.ptr), pi.len)) vm.heap.allocator.free(pi);
+    image_inst.pixel_indices = null;
+    image_inst.pixels = null;
     return 0;
 }
 
@@ -521,25 +602,27 @@ fn getBitmapDepthFromByteArray(vm: *Vm, args: bridge.ArgFrame) i16 {
     return 1;
 }
 
-pub const handle = bridge.canonical(.{
+pub const entries = .{
     // Palette-sync trio (push / query / pull)
-    .{ 15, "Image.updateNativePaletteFromJavaPalette", updateNativePaletteFromJavaPalette },
-    .{ 16, "Image.getNativePaletteSize",               getNativePaletteSize },
-    .{ 17, "Image.updateJavaPaletteFromNativePalette", updateJavaPaletteFromNativePalette },
+    .{ 15, "updateNativePaletteFromJavaPalette", updateNativePaletteFromJavaPalette },
+    .{ 16, "getNativePaletteSize",               getNativePaletteSize },
+    .{ 17, "updateJavaPaletteFromNativePalette", updateJavaPaletteFromNativePalette },
     // Transparency / palette-alpha (newly bound canonical mapping)
-    .{ 18, "Image.setTransparentColor",      setTransparentColor },
-    .{ 19, "Image.setPaletteAlpha",          setPaletteAlpha },
-    .{ 20, "Image.getTransparentColor",      getTransparentColor },
-    .{ 21, "Image.removeTransparentColor",   removeTransparentColor },
+    .{ 18, "setTransparentColor",                setTransparentColor },
+    .{ 19, "setPaletteAlpha",                    setPaletteAlpha },
+    .{ 20, "getTransparentColor",                getTransparentColor },
+    .{ 21, "removeTransparentColor",             removeTransparentColor },
     // Constants (canonical body proven, name ambiguous)
-    .{ 22, "Image.getSizeOfEXimgStruct",     getSizeOfEXimgStruct },
-    .{ 23, "Image.getManufDisplayHeaderSize", getManufDisplayHeaderSize },
+    .{ 22, "getSizeOfEXimgStruct",               getSizeOfEXimgStruct },
+    .{ 23, "getManufDisplayHeaderSize",          getManufDisplayHeaderSize },
     // Allocation + transformation
-    .{ 24, "Image.<init>",                   init },
-    .{ 25, "Image.transformToSystemPalette", transformToSystemPalette },
+    .{ 24, "<init>",                             init },
+    .{ 25, "transformToSystemPalette",           transformToSystemPalette },
     // Bitmap decode family (idx 26 verified; 27/28/29 are canonical-body-faithful but names unverified)
-    .{ 26, "TransformBitmapFromResExed",     transformBitmapFromResExed },
-    .{ 27, "GetBitmapDepthFromResExed",      getBitmapDepthFromResExed },
-    .{ 28, "TransformBitmapFromByteArray",   transformBitmapFromByteArray },
-    .{ 29, "GetBitmapDepthFromByteArray",    getBitmapDepthFromByteArray },
-});
+    .{ 26, "TransformBitmapFromResExed",         transformBitmapFromResExed },
+    .{ 27, "GetBitmapDepthFromResExed",          getBitmapDepthFromResExed },
+    .{ 28, "TransformBitmapFromByteArray",       transformBitmapFromByteArray },
+    .{ 29, "GetBitmapDepthFromByteArray",        getBitmapDepthFromByteArray },
+};
+
+pub const handle = bridge.canonical(entries);

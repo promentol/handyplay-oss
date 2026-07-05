@@ -12,6 +12,7 @@ const core = @import("core");
 const interp = core.interp;
 const bridge = core.bridge;
 
+pub const class_name: []const u8 = "Math";
 pub const first_index: u32 = 110;
 pub const last_index: u32 = 122;
 
@@ -156,18 +157,20 @@ fn sqrt(_: *interp.Vm, args: bridge.ArgFrame) i16 {
     return 1;
 }
 
-pub const handle = bridge.canonical(.{
-    .{ 110, "Math.sin",                 sin },
-    .{ 111, "Math.cos",                 cos },
-    .{ 112, "Math.getAngle",            getAngle },
-    .{ 113, "Math.setSinusPeriod",      setSinusPeriod },
-    .{ 114, "Math.getSinusPeriod",      getSinusPeriod },
-    .{ 115, "Math.getSinOfPeriod",      sinFixed1024 },
-    .{ 116, "Math.getCosOfPeriod",      cosFixed1024 },
-    .{ 117, "Math.getCosPeriodPrecise", cosFixed1024 },
-    .{ 118, "Math.getSinPeriodPrecise", sinFixed1024 },
-    .{ 119, "Math.abs",                 abs },
-    .{ 120, "Math.setRandSeed",         setRandSeed },
-    .{ 121, "Math.random",              random },
-    .{ 122, "Math.sqrt",                sqrt },
-});
+pub const entries = .{
+    .{ 110, "sin",                 sin },
+    .{ 111, "cos",                 cos },
+    .{ 112, "getAngle",            getAngle },
+    .{ 113, "setSinusPeriod",      setSinusPeriod },
+    .{ 114, "getSinusPeriod",      getSinusPeriod },
+    .{ 115, "getSinOfPeriod",      sinFixed1024 },
+    .{ 116, "getCosOfPeriod",      cosFixed1024 },
+    .{ 117, "getCosPeriodPrecise", cosFixed1024 },
+    .{ 118, "getSinPeriodPrecise", sinFixed1024 },
+    .{ 119, "abs",                 abs },
+    .{ 120, "setRandSeed",         setRandSeed },
+    .{ 121, "random",              random },
+    .{ 122, "sqrt",                sqrt },
+};
+
+pub const handle = bridge.canonical(entries);

@@ -16,6 +16,7 @@ const bridge = core.bridge;
 const Vm = interp.Vm;
 const Handle = bridge.Handle;
 
+pub const class_name: []const u8 = "Object";
 pub const first_index: u32 = 151;
 pub const last_index: u32 = 154;
 
@@ -140,9 +141,11 @@ fn waitMethod(_: *Vm, _: bridge.ArgFrame) i16 {
     return 0;
 }
 
-pub const handle = bridge.canonical(.{
-    .{ 151, "Object.getClass",  getClass },
-    .{ 152, "Object.hashCode",  hashCode },
-    .{ 153, "Object.clone",     clone },
-    .{ 154, "Object.wait",      waitMethod },
-});
+pub const entries = .{
+    .{ 151, "getClass", getClass },
+    .{ 152, "hashCode", hashCode },
+    .{ 153, "clone",    clone },
+    .{ 154, "wait",     waitMethod },
+};
+
+pub const handle = bridge.canonical(entries);

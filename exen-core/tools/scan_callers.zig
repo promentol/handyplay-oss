@@ -5,17 +5,22 @@
 //! Usage:
 //!   zig run tools/scan_callers.zig -- samples/Pikubi.exn 0x3f52e539
 const std = @import("std");
+const core = @import("core");
 
-const OperandKind = enum { none, u8op, u16op, switch_table };
+const OperandKind = enum { none, u8op, u16op, iinc, newarray, multianewarray, switch_table };
 
+/// Derived from `core.opcodes.operand_widths` (single source with the VM
+/// dispatch table). Fixes the old private table's bugs: IINC (0x84) is an
+/// UNALIGNED u8+s8 pair (was stepped as aligned u16), and the 0xAA/0xAB
+/// switch flavours are now stepped as switches instead of no-operand.
 fn operandKind(op: u8) OperandKind {
-    return switch (op) {
-        0x10, 0x19, 0x3A, 0x4A, 0xD5, 0xD6 => .u8op,
-        0x11, 0x12, 0x14, 0x99...0xA7, 0xC0, 0xC6, 0xC7, 0xBB, 0xBC,
-        0xD0, 0xED, 0xEE, 0xEF, 0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6,
-        0xF7, 0xF8, 0xF9, 0xFA => .u16op,
-        0x84 => .u16op,
-        0xCC, 0xCD => .switch_table,
+    return switch (core.opcodes.operand_widths[op]) {
+        1 => .u8op,
+        2 => .u16op,
+        -2 => .iinc,
+        -3 => .newarray,
+        -4 => .multianewarray,
+        -1 => .switch_table,
         else => .none,
     };
 }
@@ -59,17 +64,7 @@ fn collectMethodEnds(cb: []const u8, allocator: std.mem.Allocator) ![]u32 {
     return ends;
 }
 
-fn opName(op: u8) []const u8 {
-    return switch (op) {
-        0xED => "INVOKEVIRTUAL_ALT",
-        0xEE => "INVOKEVIRTUAL",
-        0xEF => "INVOKE_OWN",
-        0xF0 => "INVOKESPECIAL",
-        0xF1 => "INVOKESTATIC_ALT",
-        0xF2 => "INVOKESTATIC",
-        else => "?",
-    };
-}
+const opName = core.opcodes.opName;
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
@@ -123,6 +118,17 @@ pub fn main() !void {
                 switch (operandKind(op)) {
                     .none => {},
                     .u8op => pc += 1,
+                    .iinc => pc += 2,
+                    .newarray, .multianewarray => {
+                        // aligned u16 tag (+u8 dim first for MULTI), plus a
+                        // second u16 class ref iff tag low byte == 0x99.
+                        if (operandKind(op) == .multianewarray) pc += 1;
+                        pc = alignPc(pc);
+                        if (pc + 2 > end) break;
+                        const tag = std.mem.readInt(u16, cb[pc..][0..2], .little);
+                        pc += 2;
+                        if ((tag & 0xFF) == 0x99) pc += 2;
+                    },
                     .u16op => {
                         pc = alignPc(pc);
                         if (pc + 2 > end) break;
@@ -144,14 +150,18 @@ pub fn main() !void {
                     .switch_table => {
                         pc = alignPc(pc);
                         if (pc + 6 > end) break;
-                        if (op == 0xCD) {
+                        if (op == 0xCD or op == 0xAA) {
                             const low: i16 = @bitCast(std.mem.readInt(u16, cb[pc + 2..][0..2], .little));
                             const high: i16 = @bitCast(std.mem.readInt(u16, cb[pc + 4..][0..2], .little));
                             const range: i32 = @as(i32, high) - @as(i32, low) + 1;
                             if (range <= 0 or range > 65535) break;
                             const n: u32 = @intCast(range);
                             pc += 6 + 2 * n;
-                        } else {
+                        } else if (op == 0xAB) { // LOOKUPSWITCH_W: u32 keys, 4-byte-aligned
+                            const count: u32 = std.mem.readInt(u16, cb[pc + 2..][0..2], .little);
+                            const keys_base = (pc + 4 + 3) & ~@as(u32, 3);
+                            pc = keys_base + count * 6;
+                        } else { // LOOKUPSWITCH 0xCC: u16 key + u16 target pairs
                             const count: u32 = std.mem.readInt(u16, cb[pc + 2..][0..2], .little);
                             pc += 4 + 4 * count;
                         }

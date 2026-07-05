@@ -3,129 +3,19 @@
 //!   zig run tools/disasm_method.zig -- samples/TheTerminator.exn 0x82a4b082 0x0dcbf391
 
 const std = @import("std");
+const core = @import("core");
 
 const Op = struct { name: []const u8, operands: i32 };
 
-const OPS = blk: {
-    var t: [256]Op = [_]Op{.{ .name = "?", .operands = 0 }} ** 256;
-    t[0x00] = .{ .name = "NOP", .operands = 0 };
-    t[0x01] = .{ .name = "ACONST_NULL", .operands = 0 };
-    t[0x02] = .{ .name = "ICONST_M1", .operands = 0 };
-    t[0x03] = .{ .name = "ICONST_0", .operands = 0 };
-    t[0x04] = .{ .name = "ICONST_1", .operands = 0 };
-    t[0x05] = .{ .name = "ICONST_2", .operands = 0 };
-    t[0x06] = .{ .name = "ICONST_3", .operands = 0 };
-    t[0x07] = .{ .name = "ICONST_4", .operands = 0 };
-    t[0x08] = .{ .name = "ICONST_5", .operands = 0 };
-    t[0x10] = .{ .name = "BIPUSH", .operands = 1 };
-    t[0x11] = .{ .name = "SIPUSH", .operands = 2 };
-    t[0x12] = .{ .name = "LDC", .operands = 2 };
-    t[0x14] = .{ .name = "LDC2_W", .operands = 2 };
-    t[0x19] = .{ .name = "ALOAD", .operands = 1 };
-    t[0x2A] = .{ .name = "ALOAD_0", .operands = 0 };
-    t[0x2B] = .{ .name = "ALOAD_1", .operands = 0 };
-    t[0x2C] = .{ .name = "ALOAD_2", .operands = 0 };
-    t[0x2D] = .{ .name = "ALOAD_3", .operands = 0 };
-    t[0x32] = .{ .name = "AALOAD", .operands = 0 };
-    t[0x33] = .{ .name = "BALOAD", .operands = 0 };
-    t[0x34] = .{ .name = "CALOAD", .operands = 0 };
-    t[0x3A] = .{ .name = "ASTORE", .operands = 1 };
-    t[0x4A] = .{ .name = "ASTORE_op", .operands = 1 };
-    t[0x4B] = .{ .name = "ASTORE_0", .operands = 0 };
-    t[0x4C] = .{ .name = "ASTORE_1", .operands = 0 };
-    t[0x4D] = .{ .name = "ASTORE_2", .operands = 0 };
-    t[0x4E] = .{ .name = "ASTORE_3", .operands = 0 };
-    t[0x4F] = .{ .name = "ARRSTORE", .operands = 0 };
-    t[0x50] = .{ .name = "ARRSTORE", .operands = 0 };
-    t[0x51] = .{ .name = "ARRSTORE", .operands = 0 };
-    t[0x52] = .{ .name = "ARRSTORE", .operands = 0 };
-    t[0x53] = .{ .name = "ARRSTORE", .operands = 0 };
-    t[0x54] = .{ .name = "ARRSTORE", .operands = 0 };
-    t[0x55] = .{ .name = "ARRSTORE", .operands = 0 };
-    t[0x56] = .{ .name = "POP", .operands = 0 };
-    t[0x57] = .{ .name = "POP", .operands = 0 };
-    t[0x58] = .{ .name = "POP2", .operands = 0 };
-    t[0x59] = .{ .name = "DUP", .operands = 0 };
-    t[0x5A] = .{ .name = "DUP_X1", .operands = 0 };
-    t[0x5C] = .{ .name = "DUP2", .operands = 0 };
-    t[0x60] = .{ .name = "IADD", .operands = 0 };
-    t[0x61] = .{ .name = "LADD", .operands = 0 };
-    t[0x64] = .{ .name = "ISUB", .operands = 0 };
-    t[0x65] = .{ .name = "LSUB", .operands = 0 };
-    t[0x68] = .{ .name = "IMUL", .operands = 0 };
-    t[0x6C] = .{ .name = "IDIV", .operands = 0 };
-    t[0x70] = .{ .name = "IREM", .operands = 0 };
-    t[0x74] = .{ .name = "INEG", .operands = 0 };
-    t[0x78] = .{ .name = "ISHL", .operands = 0 };
-    t[0x7A] = .{ .name = "ISHR", .operands = 0 };
-    t[0x7C] = .{ .name = "IUSHR", .operands = 0 };
-    t[0x7E] = .{ .name = "IAND", .operands = 0 };
-    t[0x80] = .{ .name = "IOR", .operands = 0 };
-    t[0x82] = .{ .name = "IXOR", .operands = 0 };
-    t[0x84] = .{ .name = "IINC", .operands = -2 };
-    t[0x91] = .{ .name = "I2B", .operands = 0 };
-    t[0x92] = .{ .name = "I2C", .operands = 0 };
-    t[0x93] = .{ .name = "I2S", .operands = 0 };
-    t[0x99] = .{ .name = "IFEQ", .operands = 2 };
-    t[0x9A] = .{ .name = "IFNE", .operands = 2 };
-    t[0x9B] = .{ .name = "IFLT", .operands = 2 };
-    t[0x9C] = .{ .name = "IFGE", .operands = 2 };
-    t[0x9D] = .{ .name = "IFGT", .operands = 2 };
-    t[0x9E] = .{ .name = "IFLE", .operands = 2 };
-    t[0x9F] = .{ .name = "IF_ICMPEQ", .operands = 2 };
-    t[0xA0] = .{ .name = "IF_ICMPNE", .operands = 2 };
-    t[0xA1] = .{ .name = "IF_ICMPLT", .operands = 2 };
-    t[0xA2] = .{ .name = "IF_ICMPGE", .operands = 2 };
-    t[0xA3] = .{ .name = "IF_ICMPGT", .operands = 2 };
-    t[0xA4] = .{ .name = "IF_ICMPLE", .operands = 2 };
-    t[0xA5] = .{ .name = "IFNULL", .operands = 2 };
-    t[0xA6] = .{ .name = "IFNONNULL", .operands = 2 };
-    t[0xA7] = .{ .name = "GOTO", .operands = 2 };
-    t[0xB0] = .{ .name = "ARETURN", .operands = 0 };
-    t[0xB1] = .{ .name = "RETURN", .operands = 0 };
-    t[0xBB] = .{ .name = "NEW", .operands = 2 };
-    t[0xBC] = .{ .name = "NEWARRAY", .operands = 2 };
-    t[0xBE] = .{ .name = "ARRAYLENGTH", .operands = 0 };
-    t[0xC0] = .{ .name = "CHECKCAST", .operands = 2 };
-    t[0xC6] = .{ .name = "IFNULL", .operands = 2 };
-    t[0xC7] = .{ .name = "IFNONNULL", .operands = 2 };
-    t[0xCC] = .{ .name = "LOOKUPSWITCH", .operands = -1 };
-    t[0xCD] = .{ .name = "TABLESWITCH", .operands = -1 };
-    t[0xD0] = .{ .name = "LDC_STRING", .operands = 2 };
-    t[0xD5] = .{ .name = "LOAD_op", .operands = 1 };
-    t[0xD6] = .{ .name = "STORE_op", .operands = 1 };
-    t[0xD9] = .{ .name = "ALOAD_0_DUP", .operands = 0 };
-    t[0xDA] = .{ .name = "ASTORE_0", .operands = 0 };
-    t[0xDB] = .{ .name = "LLOAD_0", .operands = 0 };
-    t[0xDC] = .{ .name = "LSTORE_0", .operands = 0 };
-    t[0xDD] = .{ .name = "LOAD_1", .operands = 0 };
-    t[0xDE] = .{ .name = "STORE_1", .operands = 0 };
-    t[0xDF] = .{ .name = "LLOAD_1", .operands = 0 };
-    t[0xE0] = .{ .name = "LSTORE_1", .operands = 0 };
-    t[0xE1] = .{ .name = "LOAD_2", .operands = 0 };
-    t[0xE2] = .{ .name = "STORE_2", .operands = 0 };
-    t[0xE3] = .{ .name = "LLOAD_2", .operands = 0 };
-    t[0xE4] = .{ .name = "LSTORE_2", .operands = 0 };
-    t[0xE5] = .{ .name = "LOAD_3", .operands = 0 };
-    t[0xE6] = .{ .name = "STORE_3", .operands = 0 };
-    t[0xE7] = .{ .name = "LLOAD_3", .operands = 0 };
-    t[0xE8] = .{ .name = "LSTORE_3", .operands = 0 };
-    t[0xE9] = .{ .name = "IRETURN", .operands = 0 };
-    t[0xEA] = .{ .name = "LRETURN", .operands = 0 };
-    t[0xED] = .{ .name = "INVOKEVIRTUAL_ALT", .operands = 2 };
-    t[0xEE] = .{ .name = "INVOKEVIRTUAL", .operands = 2 };
-    t[0xEF] = .{ .name = "INVOKE_OWN", .operands = 2 };
-    t[0xF0] = .{ .name = "INVOKESPECIAL", .operands = 2 };
-    t[0xF1] = .{ .name = "INVOKESTATIC_ALT", .operands = 2 };
-    t[0xF2] = .{ .name = "INVOKESTATIC", .operands = 2 };
-    t[0xF3] = .{ .name = "GETSTATIC", .operands = 2 };
-    t[0xF4] = .{ .name = "PUTSTATIC", .operands = 2 };
-    t[0xF5] = .{ .name = "GETFIELD_OWN", .operands = 2 };
-    t[0xF6] = .{ .name = "PUTFIELD_OWN", .operands = 2 };
-    t[0xF7] = .{ .name = "GETSTATIC_FULL", .operands = 2 };
-    t[0xF8] = .{ .name = "PUTSTATIC_FULL", .operands = 2 };
-    t[0xF9] = .{ .name = "GETFIELD", .operands = 2 };
-    t[0xFA] = .{ .name = "PUTFIELD_FULL", .operands = 2 };
+/// Derived from `core.opcodes.op_specs` — single source with VM dispatch.
+/// (This tool joined the build graph for the `core` import: build with
+/// `zig build tools`, run `zig-out/bin/disasm_method`.)
+const OPS: [256]Op = blk: {
+    var t: [256]Op = undefined;
+    for (0..256) |i| t[i] = .{
+        .name = core.opcodes.mnemonics[i],
+        .operands = core.opcodes.operand_widths[i],
+    };
     break :blk t;
 };
 
@@ -220,6 +110,15 @@ pub fn main() !void {
         return;
     };
 
+    // Abstract (ACC_ABSTRACT 0x400) / bodyless methods have no bytecode;
+    // disassembling from body_offset+6 would decode the class-record
+    // header as garbage instructions.
+    if ((mi.flags & 0x400) != 0 or mi.body_offset == 0) {
+        std.debug.print("class=0x{x:0>8}  method=0x{x:0>8}\n", .{ class_hash, method_hash });
+        std.debug.print("  flags=0x{x:0>4}  arg_count={d}  — ABSTRACT / no body\n", .{ mi.flags, mi.arg_count });
+        return;
+    }
+
     const max_stack = std.mem.readInt(u16, class_bytes[mi.body_offset..][0..2], .little);
     const locals = std.mem.readInt(u16, class_bytes[mi.body_offset + 2 ..][0..2], .little);
     const body_len = std.mem.readInt(u16, class_bytes[mi.body_offset + 4 ..][0..2], .little);
@@ -263,6 +162,26 @@ pub fn main() !void {
             const delta: i8 = @bitCast(class_bytes[pc + 1]);
             std.debug.print("  local[{d}] += {d}\n", .{ idx, delta });
             pc += 2;
+        } else if (info.operands == -3 or info.operands == -4) {
+            // NEWARRAY / MULTIANEWARRAY: aligned u16 type tag (MULTI has
+            // a u8 dim first), plus a second u16 element-class ref iff
+            // the tag low byte is 0x99 (canonical sub_40EE4D v0==153).
+            var dim_str: u8 = 0;
+            if (info.operands == -4) {
+                dim_str = class_bytes[pc];
+                pc += 1;
+            }
+            pc = alignPc(pc);
+            const tag = std.mem.readInt(u16, class_bytes[pc..][0..2], .little);
+            pc += 2;
+            if (info.operands == -4) std.debug.print("  dim={d}", .{dim_str});
+            if ((tag & 0xFF) == 0x99) {
+                const cls_ref = std.mem.readInt(u16, class_bytes[pc..][0..2], .little);
+                std.debug.print("  0x{x:0>4}  classref=0x{x:0>4}\n", .{ tag, cls_ref });
+                pc += 2;
+            } else {
+                std.debug.print("  0x{x:0>4}\n", .{tag});
+            }
         } else if (info.operands == -1) {
             // TABLESWITCH / LOOKUPSWITCH — variable-length
             pc = alignPc(pc);
@@ -279,7 +198,18 @@ pub fn main() !void {
                     pc += 2;
                 }
                 std.debug.print("\n", .{});
-            } else {
+            } else if (op == 0xAB) { // LOOKUPSWITCH_W: u32 keys, 4-byte-aligned, u16 targets
+                const count: u16 = std.mem.readInt(u16, class_bytes[pc + 2 ..][0..2], .little);
+                const keys_base: u32 = (pc + 4 + 3) & ~@as(u32, 3);
+                std.debug.print("  default=0x{x:0>4}  count={d}  pairs(wide):", .{ default_pc, count });
+                for (0..count) |i| {
+                    const k = std.mem.readInt(u32, class_bytes[keys_base + 4 * @as(u32, @intCast(i)) ..][0..4], .little);
+                    const t = std.mem.readInt(u16, class_bytes[keys_base + 4 * @as(u32, count) + 2 * @as(u32, @intCast(i)) ..][0..2], .little);
+                    std.debug.print(" 0x{x:0>8}→0x{x:0>4}", .{ k, t });
+                }
+                pc = keys_base + @as(u32, count) * 6;
+                std.debug.print("\n", .{});
+            } else { // LOOKUPSWITCH 0xCC: u16 key + u16 target pairs
                 const count: u16 = std.mem.readInt(u16, class_bytes[pc + 2 ..][0..2], .little);
                 std.debug.print("  default=0x{x:0>4}  count={d}  pairs:", .{ default_pc, count });
                 pc += 4;

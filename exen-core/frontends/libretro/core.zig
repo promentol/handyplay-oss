@@ -120,6 +120,7 @@ export fn retro_load_game(game: ?*const lr.GameInfo) callconv(.c) bool {
     bios.install(gpa, sysdir, &BIOS) catch return false;
     exen.boot(gpa, "reference/simulator.ini") catch return false;
     exen.setNativeDispatcher(&natives.dispatch);
+    exen.setNativeNames(&natives.native_names);
     exen.loadExn(std.mem.sliceTo(path, 0)) catch return false;
     prev_buttons = [_]bool{false} ** 12;
     g_booted = true;
