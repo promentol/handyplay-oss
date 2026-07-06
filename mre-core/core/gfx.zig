@@ -62,6 +62,10 @@ pub const Graphics = struct {
     active_layer: usize = 0,
     global_color: u16 = 0,
     clip: Clip = .{},
+    // vm_graphic_set_alpha_blending_layer toggles this around draws; while set,
+    // blt() 50%-blends opaque source pixels with the destination instead of
+    // overwriting. Disabled by set_alpha_blending_layer(-1).
+    blend_enabled: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, mem: *Memory) !Graphics {
         const screen = try gpa.alloc(u16, screen_w * screen_h);
@@ -271,6 +275,40 @@ pub const Graphics = struct {
         }
     }
 
+    /// vm_graphic_fill_ellipse_ex: fill the ellipse inscribed in the bounding box
+    /// (x, y, w, h) with `color`, honoring the clip rect. Integer-only inside test.
+    pub fn fillEllipse(self: *Graphics, buf: u32, x: i32, y: i32, w: i32, h: i32, color: u16) void {
+        const c = self.findCanvas(buf) orelse return;
+        if (w <= 0 or h <= 0) return;
+        // Work in doubled coordinates so the center lands on integers:
+        // 2*center = 2*x + w. A pixel's doubled center is 2*sx + 1.
+        const cx2: i64 = 2 * @as(i64, x) + w;
+        const cy2: i64 = 2 * @as(i64, y) + h;
+        const rx: i64 = @as(i64, w) * w; // w^2 (== (2*semi-axis)^2)
+        const ry: i64 = @as(i64, h) * h;
+        var st_x = @max(@as(i32, 0), x);
+        var st_y = @max(@as(i32, 0), y);
+        var end_x = @min(c.w, x + w);
+        var end_y = @min(c.h, y + h);
+        if (self.clip.flag) {
+            st_x = @max(st_x, self.clip.left);
+            st_y = @max(st_y, self.clip.top);
+            end_x = @min(end_x, self.clip.right + 1);
+            end_y = @min(end_y, self.clip.bottom + 1);
+        }
+        var sy = st_y;
+        while (sy < end_y) : (sy += 1) {
+            const dy: i64 = 2 * @as(i64, sy) + 1 - cy2;
+            var sx = st_x;
+            while (sx < end_x) : (sx += 1) {
+                const dx: i64 = 2 * @as(i64, sx) + 1 - cx2;
+                // (dx/w)^2 + (dy/h)^2 <= 1  ->  dx^2*h^2 + dy^2*w^2 <= w^2*h^2
+                if (dx * dx * ry + dy * dy * rx <= rx * ry)
+                    self.putPixel(c, sx, sy, color);
+            }
+        }
+    }
+
     /// vm_graphic_fill_polygon: even-odd scanline fill of an N-point polygon into a
     /// canvas, using the global pen color. Points are `vm_graphic_point {VMINT16 x,y}`
     /// (4 bytes each) at `pts_emu` in guest memory. Honors the clip rect.
@@ -386,10 +424,29 @@ pub const Graphics = struct {
                 const im_y = sy - y_dest + y_src;
                 if (im_x < 0 or im_x >= src.w or im_y < 0 or im_y >= src.h) continue;
                 const color = self.mem.readU16(src.pixels + @as(u32, @intCast(im_y * src.w + im_x)) * 2);
-                if (!src.flag or color != src.trans_color)
-                    self.mem.writeU16(dst.pixels + @as(u32, @intCast(sy * dst.w + sx)) * 2, color);
+                if (src.flag and color == src.trans_color) continue; // transparent
+                const dst_off = dst.pixels + @as(u32, @intCast(sy * dst.w + sx)) * 2;
+                const out = if (self.blend_enabled) blend565(color, self.mem.readU16(dst_off)) else color;
+                self.mem.writeU16(dst_off, out);
             }
         }
+    }
+
+    /// 50% alpha blend of two RGB565 pixels, per channel.
+    fn blend565(a: u16, b: u16) u16 {
+        const ar = (a >> 11) & 0x1F;
+        const ag = (a >> 5) & 0x3F;
+        const ab = a & 0x1F;
+        const br = (b >> 11) & 0x1F;
+        const bg = (b >> 5) & 0x3F;
+        const bb = b & 0x1F;
+        return ((ar + br) >> 1) << 11 | ((ag + bg) >> 1) << 5 | ((ab + bb) >> 1);
+    }
+
+    /// vm_graphic_set_alpha_blending_layer: enable 50% blend for subsequent blts
+    /// when handle >= 0; a handle of -1 disables it.
+    pub fn setAlphaBlend(self: *Graphics, handle: i32) void {
+        self.blend_enabled = handle >= 0;
     }
 
     pub fn setClip(self: *Graphics, l: i32, t: i32, r: i32, b: i32) void {

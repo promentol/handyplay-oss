@@ -64,6 +64,7 @@ pub const table = [_]Native{
     .{ .name = "vm_get_vm_tag", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — VM tag value unconfirmed
     .{ .name = "vm_app_log", .handler = appLog },
     .{ .name = "vm_switch_power_saving_mode", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — no device power state; no-op is correct
+    .{ .name = "vm_get_sys_scene", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: sound profile; 0 = standard mode (not silent/meeting), the sensible default
     .{ .name = "vm_appmgr_is_installed", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — always "not installed"; may affect self-install flows
     .{ .name = "vm_appmgr_get_installed_list", .handler = appmgrList },
     .{ .name = "vm_exit_app", .handler = exitApp },
@@ -147,7 +148,10 @@ pub const table = [_]Native{
     .{ .name = "vm_graphic_create_layer_cf", .handler = gCreateLayerCf },
     .{ .name = "vm_graphic_load_image", .handler = gLoadImage },
     .{ .name = "vm_graphic_load_image_resized", .handler = gLoadImageResized },
+    .{ .name = "vm_graphic_draw_image_from_memory", .handler = gDrawImageFromMemory },
     .{ .name = "vm_graphic_get_img_property", .handler = gGetImgProperty },
+    .{ .name = "vm_graphic_get_img_property_ex", .handler = gGetImgPropertyEx },
+    .{ .name = "vm_graphic_set_alpha_blending_layer", .handler = gSetAlphaBlend },
     .{ .name = "vm_graphic_get_frame_number", .handler = gGetFrameNumber },
     .{ .name = "vm_graphic_blt", .handler = gBlt },
     .{ .name = "vm_graphic_blt_ex", .handler = gBltEx },
@@ -166,6 +170,7 @@ pub const table = [_]Native{
     .{ .name = "vm_graphic_rect", .handler = gRect },
     .{ .name = "vm_graphic_rect_ex", .handler = gRectEx },
     .{ .name = "vm_graphic_fill_polygon", .handler = gFillPolygon },
+    .{ .name = "vm_graphic_fill_ellipse_ex", .handler = gFillEllipseEx },
     .{ .name = "vm_graphic_set_clip", .handler = gSetClip },
     .{ .name = "vm_graphic_reset_clip", .handler = gResetClip },
     .{ .name = "vm_graphic_flush_screen", .handler = gFlushScreen },
@@ -215,6 +220,8 @@ pub const table = [_]Native{
     .{ .name = "vm_wstrcat", .handler = wstrcat },
     .{ .name = "vm_wstrcmp", .handler = wstrcmp },
     .{ .name = "vm_get_filename", .handler = getFilename },
+    .{ .name = "vm_lower_case", .handler = lowerCase },
+    .{ .name = "vm_get_gmobi_language", .handler = getGmobiLanguage },
 
     // ---- Audio ----
     .{ .name = "vm_set_volume", .handler = setVolume },
@@ -324,7 +331,14 @@ fn getTotalMem(vm: *Vm) void {
     vm.setRet(@intCast(vm.mem.buf.len));
 }
 fn getTickCount(vm: *Vm) void {
-    vm.setRet(vm.clock_ms); // deterministic; advanced by vm.tick(delta)
+    // Nudge the clock on every read. clock_ms is otherwise frozen for the duration
+    // of a single runCpu callback, so a game that busy-waits on elapsed time
+    // (`while (get_tick_count() - start < delay) {}`) inside one callback would spin
+    // forever (our clock only advances between ticks). The +1/call keeps such waits
+    // making progress so they terminate; it's negligible beside vm.tick(delta)'s
+    // per-frame advance during normal pacing. Fixes the Block Breaker 3 startup hang.
+    vm.clock_ms +%= 1;
+    vm.setRet(vm.clock_ms);
 }
 fn getTime(vm: *Vm) void {
     vm.setRet(0);
@@ -675,6 +689,18 @@ fn gFillPolygon(vm: *Vm) void {
         vm.gfx.fillPolygon(buf, vm.arg(1), vm.arg(2), vm.gfx.global_color);
     vm.setRet(0);
 }
+fn gSetAlphaBlend(vm: *Vm) void {
+    // vm_graphic_set_alpha_blending_layer(handle): handle>=0 enables 50% blend for
+    // subsequent blts; -1 disables. Games bracket a draw with enable/…/disable.
+    vm.gfx.setAlphaBlend(s(vm.arg(0)));
+    vm.setRet(0);
+}
+fn gFillEllipseEx(vm: *Vm) void {
+    // arg0 = layer handle (-1 = active); (arg1,arg2,arg3,arg4) = bounding box x,y,w,h.
+    if (vm.gfx.activeBuf(s(vm.arg(0)))) |buf|
+        vm.gfx.fillEllipse(buf, s(vm.arg(1)), s(vm.arg(2)), s(vm.arg(3)), s(vm.arg(4)), vm.gfx.global_color);
+    vm.setRet(0);
+}
 fn gRect(vm: *Vm) void {
     vm.gfx.rect(vm.arg(0), s(vm.arg(1)), s(vm.arg(2)), s(vm.arg(3)), s(vm.arg(4)), @truncate(vm.arg(5)));
     vm.setRet(0);
@@ -748,46 +774,75 @@ fn gCanvasTrans(vm: *Vm) void {
 
 const trans_sentinel: u16 = gfx.trans_sentinel; // magenta — transparent-key for alpha pixels
 
-fn gLoadImage(vm: *Vm) void {
-    const img = vm.arg(0);
-    const len = vm.arg(1);
-    if (img == 0 or len == 0) return vm.setRet(0);
-    const bytes = vm.mem.slice(img, len);
+const DecodedImage = struct { w: u32, h: u32, rgba: []u8 };
 
-    // PNG and GIF are the formats MRE sprites use; pick by magic.
-    const Decoded = struct { w: u32, h: u32, rgba: []u8 };
-    const decoded: Decoded = blk: {
-        if (png.decode(vm.gpa, bytes)) |d| {
-            break :blk .{ .w = d.w, .h = d.h, .rgba = d.rgba };
-        } else |_| {}
-        if (gif.decode(vm.gpa, bytes)) |d| {
-            break :blk .{ .w = d.w, .h = d.h, .rgba = d.rgba };
-        } else |_| {}
-        if (bytes.len >= 2) std.debug.print("[load_image] unsupported magic {x:0>2}{x:0>2}\n", .{ bytes[0], bytes[1] });
-        return vm.setRet(0);
-    };
-    defer vm.gpa.free(decoded.rgba);
+/// Decode PNG/GIF bytes to RGBA (caller frees `.rgba`). null on unsupported.
+fn decodeImage(vm: *Vm, bytes: []const u8, tag: []const u8) ?DecodedImage {
+    if (png.decode(vm.gpa, bytes)) |d| return .{ .w = d.w, .h = d.h, .rgba = d.rgba } else |_| {}
+    if (gif.decode(vm.gpa, bytes)) |d| return .{ .w = d.w, .h = d.h, .rgba = d.rgba } else |_| {}
+    if (bytes.len >= 2) std.debug.print("[{s}] unsupported magic {x:0>2}{x:0>2}\n", .{ tag, bytes[0], bytes[1] });
+    return null;
+}
+
+/// Decode image bytes into a fresh app-arena canvas (RGB565, alpha<128 keyed to
+/// the magenta trans sentinel). Returns the canvas signature address, or 0.
+fn decodeToCanvas(vm: *Vm, bytes: []const u8, tag: []const u8) u32 {
+    const d = decodeImage(vm, bytes, tag) orelse return 0;
+    defer vm.gpa.free(d.rgba);
     if (std.posix.getenv("DIAG") != null)
-        std.debug.print("[load_image] decoded {d}x{d}\n", .{ decoded.w, decoded.h });
-
-    const canvas = vm.gfx.createCanvas(appMallocThunk, vm, @intCast(decoded.w), @intCast(decoded.h));
-    if (canvas == 0) return vm.setRet(0);
-
+        std.debug.print("[{s}] decoded {d}x{d}\n", .{ tag, d.w, d.h });
+    const canvas = vm.gfx.createCanvas(appMallocThunk, vm, @intCast(d.w), @intCast(d.h));
+    if (canvas == 0) return 0;
     const pixels = canvas + gfx.canvas_data_offset;
     var has_trans = false;
     var i: u32 = 0;
-    const n = decoded.w * decoded.h;
+    const n = d.w * d.h;
     while (i < n) : (i += 1) {
         const o = i * 4;
-        var c565: u16 = gfx.rgb565(decoded.rgba[o], decoded.rgba[o + 1], decoded.rgba[o + 2]);
-        if (decoded.rgba[o + 3] < 128) {
+        var c565: u16 = gfx.rgb565(d.rgba[o], d.rgba[o + 1], d.rgba[o + 2]);
+        if (d.rgba[o + 3] < 128) {
             c565 = trans_sentinel;
             has_trans = true;
         }
         vm.mem.writeU16(pixels + i * 2, c565);
     }
     if (has_trans) _ = vm.gfx.canvasSetTransColor(canvas, trans_sentinel);
-    vm.setRet(canvas);
+    return canvas;
+}
+
+fn gLoadImage(vm: *Vm) void {
+    if (vm.arg(0) == 0 or vm.arg(1) == 0) return vm.setRet(0);
+    vm.setRet(decodeToCanvas(vm, vm.mem.slice(vm.arg(0), vm.arg(1)), "load_image"));
+}
+
+fn gDrawImageFromMemory(vm: *Vm) void {
+    // vm_graphic_draw_image_from_memory(handle, x, y, img_data, img_len): decode the
+    // buffer into a temp canvas, blt it onto the layer at (x,y), free the temp.
+    // blt honors the clip rect and index-transparency. Returns VM_GDI_SUCCEED (0).
+    const dest = vm.gfx.activeBuf(s(vm.arg(0))) orelse return vm.setRet(u(-1));
+    const img = vm.arg(3);
+    const len = vm.arg(4);
+    if (img == 0 or len == 0) return vm.setRet(u(-1));
+    const canvas = decodeToCanvas(vm, vm.mem.slice(img, len), "draw_image_from_memory");
+    if (canvas == 0) return vm.setRet(u(-1));
+    if (vm.gfx.canvasInfo(canvas)) |info|
+        vm.gfx.blt(dest, s(vm.arg(1)), s(vm.arg(2)), canvas, 0, 0, info.w, info.h);
+    if (appArena(vm)) |a| a.free(canvas); // temp canvas: freed after the draw
+    vm.setRet(0);
+}
+
+fn gGetImgPropertyEx(vm: *Vm) void {
+    // vm_graphic_get_img_property_ex(img_data, img_len, vm_graphic_imgprop*):
+    // fill { VMINT width@0; VMINT height@4 } from the decoded image. 0 on success.
+    const img = vm.arg(0);
+    const len = vm.arg(1);
+    const prop = vm.arg(2);
+    if (img == 0 or len == 0 or prop == 0) return vm.setRet(u(-1));
+    const d = decodeImage(vm, vm.mem.slice(img, len), "get_img_property_ex") orelse return vm.setRet(u(-1));
+    vm.gpa.free(d.rgba);
+    vm.mem.writeU32(prop + 0, d.w);
+    vm.mem.writeU32(prop + 4, d.h);
+    vm.setRet(0);
 }
 
 fn gLoadImageResized(vm: *Vm) void {
@@ -1078,6 +1133,27 @@ fn asciiToUcs2(vm: *Vm) void {
         if (c == 0) break;
     }
     vm.setRet(0);
+}
+fn lowerCase(vm: *Vm) void {
+    // vm_lower_case(char* dst, char* src): copy an ASCII C-string lowercasing A-Z.
+    const dst = vm.arg(0);
+    const src = vm.arg(1);
+    if (dst == 0 or src == 0) return vm.setRet(0);
+    var i: u32 = 0;
+    while (true) : (i += 1) {
+        var c = vm.mem.buf[src + i];
+        if (c >= 'A' and c <= 'Z') c += 32;
+        vm.mem.buf[dst + i] = c;
+        if (c == 0) break;
+    }
+    vm.setRet(0);
+}
+fn getGmobiLanguage(vm: *Vm) void {
+    // vm_get_gmobi_language() (GMobi ext, undocumented): games call it and read
+    // *result as a language id, falling back gracefully. Return a valid pointer to
+    // a zeroed word (id 0 = default) so the deref is safe.
+    vm.mem.writeU32(vm.scratch, 0);
+    vm.setRet(vm.scratch);
 }
 fn getFilename(vm: *Vm) void {
     // vm_get_filename(VMWSTR path, VMWSTR filename): copy the basename (part after
