@@ -116,10 +116,11 @@ pub const Vm = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, heap_alloc: std.mem.Allocator, registry: *const cr.Registry, slab_size: u32) !Vm {
-        // `allocator` is the fixed-buffer arena (exen.zig passes the FBA) — slab and
-        // class statics live there (flat-dumped by the save-state). `heap_alloc` is a
-        // FREEING allocator (the gpa) so the object heap can be garbage-collected;
-        // the save-state serializes that object table separately. See exen.zig.
+        // `allocator` backs the slab + class statics; `heap_alloc` backs the object
+        // heap so the GC can reclaim it. Today exen.zig passes the same freeing gpa for
+        // both — the params stay separate so a future ThreadX pool can take over just
+        // the object heap. The save-state serializes slab + statics + object heap
+        // explicitly (no allocator-blob dump). See exen.zig.
         const slab = try allocator.alloc(u32, slab_size);
         if (!palette_state_init) {
             palette_state = std.AutoHashMap(u32, PaletteState).init(heap_alloc);
@@ -162,10 +163,13 @@ pub const Vm = struct {
             for (co.*.statics) |v| mark(self, &work, A, v);
             mark(self, &work, A, co.*.class_handle);
         }
-        // … the FULL operand slab (conservatively — between ticks slab_top is at its
-        // baseline, but live handles can still sit in slab memory the gamelet reads
-        // next tick; stale ints over-retain, which is safe) …
-        for (self.slab) |v| mark(self, &work, A, v);
+        // … the LIVE operand region only (`slab[0..slab_top]`). GC runs between ticks
+        // with the frame stack unwound, so slab_top is at its baseline and everything
+        // above it is dead memory from popped frames — next tick's frames start at
+        // slab_top and overwrite it, so nothing above is ever read. Scanning the full
+        // 256K-word slab every tick (262K hashmap lookups) was the dominant per-tick
+        // cost and made stale handle-valued ints in dead slots falsely retain objects.
+        for (self.slab[0..self.slab_top]) |v| mark(self, &work, A, v);
         // … and the bootstrap gamelet (pinned; it may be held only by this global).
         mark(self, &work, A, bootstrap_gamelet_handle);
 

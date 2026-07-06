@@ -156,6 +156,18 @@ const Capture = struct {
 var g_captures: [8]Capture = [_]Capture{.{ .fire_at = 0 }} ** 8;
 var g_captures_count: u32 = 0;
 
+// `--quit-at=MS` — request a clean quit at the given elapsed ms (0 = disabled).
+// Runs the normal shutdown path (`defer exen.shutdown()`), so DebugAllocator's
+// leak report fires — the headless acceptance test for the allocator work.
+var g_quit_at_ms: u64 = 0;
+
+// `--savestate-at=MS` — one-shot in-place save→load round-trip (0 = disabled).
+// Exercises the FBA-free serialization (slab + class statics + object heap tables)
+// against a live booted gamelet, and checks the framebuffer is bit-identical after
+// the reload. Acceptance test for the save-state rewrite.
+var g_savestate_at_ms: u64 = 0;
+var g_savestate_done: bool = false;
+
 fn cbToggle(userdata: ?*anyopaque, entry: ?*c.SDL_TrayEntry) callconv(.c) void {
     const flag: *bool = @ptrCast(@alignCast(userdata));
     flag.* = !flag.*;
@@ -427,6 +439,18 @@ pub fn main() !void {
                 }
                 continue;
             }
+            // `--quit-at=MS` → clean quit at elapsed MS (headless leak-check).
+            if (std.mem.startsWith(u8, a, "--quit-at=")) {
+                g_quit_at_ms = std.fmt.parseInt(u64, a["--quit-at=".len..], 10) catch 0;
+                std.debug.print("[opt] quit-at: +{d}ms\n", .{g_quit_at_ms});
+                continue;
+            }
+            // `--savestate-at=MS` → one-shot save→load round-trip at elapsed MS.
+            if (std.mem.startsWith(u8, a, "--savestate-at=")) {
+                g_savestate_at_ms = std.fmt.parseInt(u64, a["--savestate-at=".len..], 10) catch 0;
+                std.debug.print("[opt] savestate-at: +{d}ms\n", .{g_savestate_at_ms});
+                continue;
+            }
             exn_path_arg = a;
         }
         g_exn_path = try allocator.dupe(u8, exn_path_arg);
@@ -556,6 +580,29 @@ pub fn main() !void {
                     std.debug.print("[screenshot] wrote {s} at +{d}ms\n", .{ path, elapsed });
                     cap.fired = true;
                 }
+            }
+            // One-shot save→load round-trip (--savestate-at=…). Checks the framebuffer
+            // is bit-identical after reload — acceptance test for the save-state rewrite.
+            if (g_savestate_at_ms != 0 and !g_savestate_done and elapsed >= g_savestate_at_ms) {
+                g_savestate_done = true;
+                var crc_before: u32 = 0;
+                for (fb.pixels) |px| crc_before = crc_before *% 31 +% px;
+                const sz = exen.stateSize();
+                if (allocator.alloc(u8, sz)) |buf| {
+                    defer allocator.free(buf);
+                    if (exen.saveState(buf)) |n| {
+                        if (exen.loadState(buf[0..n])) |_| {
+                            var crc_after: u32 = 0;
+                            for (fb.pixels) |px| crc_after = crc_after *% 31 +% px;
+                            std.debug.print("[savestate] round-trip OK: {d} bytes, fb crc {s} (0x{x} -> 0x{x})\n", .{ n, if (crc_before == crc_after) "MATCH" else "MISMATCH", crc_before, crc_after });
+                        } else |err| std.debug.print("[savestate] loadState FAILED: {s}\n", .{@errorName(err)});
+                    } else |err| std.debug.print("[savestate] saveState FAILED: {s}\n", .{@errorName(err)});
+                } else |err| std.debug.print("[savestate] alloc FAILED: {s}\n", .{@errorName(err)});
+            }
+            // Scheduled clean quit (--quit-at=…) — exercises shutdown + leak report.
+            if (g_quit_at_ms != 0 and elapsed >= g_quit_at_ms) {
+                std.debug.print("[quit-at] elapsed +{d}ms — quitting cleanly\n", .{elapsed});
+                g_state.quit = true;
             }
         }
 

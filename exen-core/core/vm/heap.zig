@@ -103,21 +103,12 @@ pub const Instance = struct {
 /// rebuilds the heap on load with handles preserved, so the handles restored into the
 /// slab/statics still resolve. See exen.zig saveState/loadState (ST_VERSION 2).
 pub const Heap = struct {
-    /// FREEING allocator (NOT the FBA bump arena) — so `freeOne` actually reclaims an
-    /// Instance + its field_map + owned buffers. Everything an Instance owns is
-    /// allocated from here so the GC can return it. (slab + class statics stay on the
-    /// FBA in exen.zig; only the object heap moved here so it can be collected.)
+    /// FREEING allocator — so `freeOne` actually reclaims an Instance + its field_map +
+    /// owned buffers. Everything an Instance owns is allocated from here (the whole VM
+    /// shares one allocator; see exen.zig). The GC returns dead objects to it.
     allocator: std.mem.Allocator,
     instances: std.AutoHashMap(u32, *Instance),
     next_handle: u32 = 1,
-    /// The object-arena address range (set by exen.boot). Every Instance, field_map,
-    /// and owned byte/int buffer is allocated from that arena, so it is freeable. A few
-    /// `pixels`/`pixel_indices` slices are BORROWED from the pre-decoded image cache
-    /// (they point outside the arena) and must NOT be freed — we free a buffer only when
-    /// its pointer lies inside [arena_lo, arena_hi). (Belt-and-suspenders: the arena's
-    /// own `free` also no-ops on a pointer it doesn't own.)
-    arena_lo: usize = 0,
-    arena_hi: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{
@@ -126,12 +117,17 @@ pub const Heap = struct {
         };
     }
 
-    /// A buffer is freeable only if non-empty (zero-length slices carry a sentinel
-    /// pointer that isn't a real allocation) and resident in the object arena.
+    /// A buffer is freeable if it's a real, non-empty allocation. Instance-owned
+    /// buffers (`bytes`/`ints`/`pixels_owned`/`pixel_indices`) always come from
+    /// `allocator`; borrowed data (pre-decoded image-cache pixels) lives only in the
+    /// separate `pixels` field, which `freeInstance` never frees. Zero-length slices
+    /// carry a sentinel pointer that isn't a real allocation, so skip those.
     /// Pub so natives that swap an Instance-owned buffer (e.g. Image.init's
     /// pixel-buffer resize) can apply the same ownership rule.
     pub fn freeable(self: *const Heap, ptr: usize, len: usize) bool {
-        return len > 0 and ptr >= self.arena_lo and ptr < self.arena_hi;
+        _ = self;
+        _ = ptr;
+        return len > 0;
     }
 
     pub fn deinit(self: *Heap) void {

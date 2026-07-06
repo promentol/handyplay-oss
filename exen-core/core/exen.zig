@@ -18,7 +18,6 @@ pub const gfx = @import("gfx.zig");
 pub const classfile = @import("classfile/methods.zig");
 pub const class_registry = @import("classfile/registry.zig");
 pub const interp = @import("vm/interp.zig");
-pub const obj_arena_mod = @import("vm/object_arena.zig");
 pub const png = @import("codecs/png.zig");
 pub const codec = @import("codecs/codec_1to5.zig");
 pub const text = @import("text.zig");
@@ -86,22 +85,19 @@ var g_fb: ?gfx.Framebuffer = null;            // simulated LCD pixel buffer
 var g_builtins_blob: ?[]u8 = null;            // unk_4494F0.bin contents
 var g_registry: ?class_registry.Registry = null;
 var g_vm_interp: ?interp.Vm = null;
-/// Fixed-buffer arena backing the entire interp VM (see boot step 12). Save-states
-/// dump this region. `g_vm_fba` must be a global so the captured Allocator is stable.
-var g_vm_arena: []u8 = &.{};
-var g_vm_fba: std.heap.FixedBufferAllocator = undefined;
-/// FBA region: slab + class statics only (long-lived, never freed per-object → bump is
-/// fine). Owned-object memory moved to `g_obj_arena` so it can be reclaimed by the GC.
-pub const vm_arena_size: usize = 16 * 1024 * 1024;
-
-/// Object-heap region: a fixed free-list arena owning every Instance, its field map,
-/// its byte/int buffers, the handle table, and the palette side-table. This is what
-/// makes the VM RTOS-ready — steady-state object alloc/free never touches a general-
-/// purpose host allocator, only this buffer (on RTOS: a static array). The GC frees
-/// back into it (unlike the bump FBA, which never reclaimed). See object_arena.zig.
-var g_obj_buf: []u8 = &.{};
-var g_obj_arena: obj_arena_mod.ObjectArena = undefined;
-pub const obj_arena_size: usize = 48 * 1024 * 1024;
+/// The single freeing allocator backing the whole interp VM — operand slab, class
+/// statics (`class_objects`/`ClassObject`), AND the object heap (Instances, field
+/// maps, owned byte/int/pixel buffers). One allocator, so the GC's `freeInstance`
+/// actually reclaims per-object memory (a bump allocator never could — that leaked
+/// per-frame `getBytes` byte[]s and slowed the menu). `DebugAllocator` is chosen for
+/// its leak / invalid-free detection while we bring this up.
+///
+/// Save-states no longer flat-dump a contiguous arena; the slab is dumped by value
+/// and the object heap + class statics are serialized as by-value tables.
+///
+/// RTOS/ThreadX later: replace `g_gpa.allocator()` at the boot site with a
+/// `tx_byte_pool` wrapper — no other code changes (it goes through `std.mem.Allocator`).
+var g_gpa: std.heap.DebugAllocator(.{}) = .init;
 
 // ── public API ────────────────────────────────────────────────────────────
 
@@ -204,26 +200,16 @@ pub fn boot(
     // a ~200-deep recursion (method 0x9118b171 on 0x2eb36ef0) that
     // walks the score table; with 64K words we'd overflow on long
     // runs. 256K gives ~24K frame depth, comfortable headroom.
-    // Two fixed buffers the whole interp VM allocates from (no general-purpose host
-    // malloc in steady state — the RTOS-ready property):
-    //   • FBA (bump): the operand slab + class statics. Long-lived, never freed per
-    //     object, so a bump allocator is the right tool. Flat-dumped by the save-state.
-    //   • Object arena (free-list): every Instance, its field map, owned byte/int
-    //     buffers, the handle table, and the palette side-table. The GC frees back
-    //     into it (a bump arena couldn't, which is why the heap grew unboundedly).
-    // Both globals are module-level so the Allocators the VM's maps capture (which hold
-    // `&g_vm_fba` / `&g_obj_arena`) stay valid after `Vm.init`'s by-value return.
-    g_vm_arena = try allocator.alloc(u8, vm_arena_size);
-    g_vm_fba = std.heap.FixedBufferAllocator.init(g_vm_arena);
-    g_obj_buf = try allocator.alignedAlloc(u8, .@"16", obj_arena_size);
-    g_obj_arena = obj_arena_mod.ObjectArena.init(g_obj_buf);
-    // FBA → slab + class statics (flat-dumped); object arena → the GC'd object heap
-    // (serialized separately as a table in the save-state).
-    g_vm_interp = try interp.Vm.init(g_vm_fba.allocator(), g_obj_arena.allocator(), &g_registry.?, 256 * 1024);
-    // The heap frees owned buffers only when they live inside the object arena (a few
-    // borrowed slices — e.g. cached image pixels — point elsewhere and must be skipped).
-    g_vm_interp.?.heap.arena_lo = @intFromPtr(g_obj_arena.base);
-    g_vm_interp.?.heap.arena_hi = @intFromPtr(g_obj_arena.base) + g_obj_arena.len;
+    // One freeing allocator (`g_gpa`) backs the whole interp VM: the operand slab and
+    // class statics (via the first arg) and the GC'd object heap (via the second). The
+    // two args stay distinct so a future ThreadX `tx_byte_pool` can take over just the
+    // object heap without touching the slab/statics path. `freeInstance` reclaims owned
+    // buffers by field ownership (no address-range gate), so any allocator works here.
+    // Fresh allocator per boot (a prior session's `shutdown` called `g_gpa.deinit()`,
+    // which leaves it unusable) so re-loading a gamelet in the same process is clean.
+    g_gpa = .init;
+    const obj_alloc = g_gpa.allocator();
+    g_vm_interp = try interp.Vm.init(obj_alloc, obj_alloc, &g_registry.?, 256 * 1024);
     if (g_fb) |*fb| g_vm_interp.?.framebuffer = fb;
 
     // 13. Native font atlas — the 5×8 1bpp glyphs baked into
@@ -1049,19 +1035,14 @@ pub fn framebuffer() ?*gfx.Framebuffer {
 
 pub fn shutdown() void {
     if (g_vm_interp) |*vm| {
-        // The VM allocated slab/class-statics from the FBA and its object heap from the
-        // object arena; both are bulk-freed below, so the per-object frees here are
-        // effectively no-ops. `deinit`'s param frees slab/class-statics (FBA).
-        vm.deinit(g_vm_fba.allocator());
+        // Everything (slab, class statics, object heap) lives on `g_gpa`. `deinit`
+        // frees the slab + every ClassObject through it, and `heap.deinit` (called by
+        // `vm.deinit`) frees every Instance + owned buffer. Then `g_gpa.deinit()` below
+        // reports any object we leaked — the primary regression signal for this fix.
+        vm.deinit(g_gpa.allocator());
         g_vm_interp = null;
-    }
-    if (g_vm_arena.len != 0) {
-        g_alloc.free(g_vm_arena);
-        g_vm_arena = &.{};
-    }
-    if (g_obj_buf.len != 0) {
-        g_alloc.free(g_obj_buf);
-        g_obj_buf = &.{};
+        const check = g_gpa.deinit();
+        log.info("object-heap allocator deinit: {s}", .{@tagName(check)});
     }
     if (g_registry) |*r| {
         r.deinit();
@@ -1114,17 +1095,23 @@ pub fn shutdown() void {
 // ===========================================================================
 // Save-states (libretro retro_serialize primitive, also via the WASM ABI).
 //
-// The whole interp VM allocates from one fixed buffer (`g_vm_arena`), so a snapshot
-// is: the used arena bytes + the interp Vm struct (whose slab/map pointers index into
-// the arena) + the separate composite heap + the VmState block + input/tick scalars +
-// the framebuffer. Pointers are arena/global addresses, valid when reloaded into the
-// same running core (same-session / rewind). Taken between ticks (quiescent VM).
+// The VM has no single flat buffer any more (the FBA is gone). A snapshot is: the
+// interp Vm struct (scalars — slab_top, clock, rng, halt flags — captured by value;
+// its pointer/slice fields are re-pinned from the live VM on load) + the operand slab
+// contents + the class-statics table + the composite heap + the VmState block + input/
+// tick scalars + the framebuffer + the object-heap table. Object handles are position-
+// independent, so handles sitting in the restored slab/statics resolve to the rebuilt
+// objects. Same-session / rewind only. Taken between ticks (quiescent VM).
 // ===========================================================================
 const ST_MAGIC: u32 = 0x4558_4E53; // "EXNS"
-const ST_VERSION: u32 = 2; // v2: object heap serialized as a table (was flat-dumped in the FBA)
+const ST_VERSION: u32 = 3; // v3: no FBA — slab + class statics serialized explicitly (v2 flat-dumped them)
 
-/// Serialized size of the object heap (the heap moved off the FBA to the gpa so the GC
-/// can free it — see [[reference_exen_canonical_gc]] — so it can't ride the flat dump).
+/// Serialized size of the class-statics table (count + one flat record per class).
+fn classStaticsSize() usize {
+    return 4 + g_vm_interp.?.class_objects.count() * (4 + 256 * 4 + 4);
+}
+
+/// Serialized size of the object heap (serialized as a by-value table, not a blob).
 fn heapStateSize() usize {
     const h = &g_vm_interp.?.heap;
     var n: usize = 8; // next_handle + count
@@ -1144,7 +1131,8 @@ fn heapStateSize() usize {
 pub fn stateSize() usize {
     if (g_vm_interp == null) return 0;
     const fb_bytes: usize = if (g_fb) |fb| fb.pixels.len * 4 else 0;
-    return g_vm_fba.end_index + @sizeOf(interp.Vm) + g_vm_heap.len + g_vm.bytes.len + fb_bytes + heapStateSize() + 8192;
+    const slab_bytes = g_vm_interp.?.slab.len * 4 + 8;
+    return @sizeOf(interp.Vm) + slab_bytes + classStaticsSize() + g_vm_heap.len + g_vm.bytes.len + fb_bytes + heapStateSize() + 8192;
 }
 
 pub fn saveState(out: []u8) !usize {
@@ -1152,9 +1140,21 @@ pub fn saveState(out: []u8) !usize {
     var w = savestate.Cursor{ .buf = out };
     w.u32v(ST_MAGIC);
     w.u32v(ST_VERSION);
-    w.usizev(g_vm_fba.end_index);
-    w.bytes(g_vm_arena[0..g_vm_fba.end_index]);
+    // interp Vm struct (by value — scalars/flags; pointer fields re-pinned on load).
     w.bytes(std.mem.asBytes(&g_vm_interp.?));
+    // operand slab contents (fixed-size []u32).
+    w.usizev(g_vm_interp.?.slab.len);
+    w.bytes(std.mem.sliceAsBytes(g_vm_interp.?.slab));
+    // class-statics table: count + per class {hash, statics[256], class_handle}.
+    const co_map = &g_vm_interp.?.class_objects;
+    w.u32v(co_map.count());
+    var coit = co_map.iterator();
+    while (coit.next()) |e| {
+        w.u32v(e.key_ptr.*);
+        const co = e.value_ptr.*;
+        for (co.statics) |s| w.u32v(s);
+        w.u32v(co.class_handle);
+    }
     w.usizev(g_vm_heap.len);
     w.bytes(g_vm_heap);
     w.bytes(&g_vm.bytes);
@@ -1169,9 +1169,8 @@ pub fn saveState(out: []u8) !usize {
         w.bytes(std.mem.sliceAsBytes(fb.pixels));
     } else w.u32v(0);
 
-    // object heap (lives on the gpa, NOT the FBA flat dump) — serialize as a table.
-    // Handles are position-independent, so the handles still sitting in the slab/statics
-    // (restored from the flat arena dump) keep pointing at the right rebuilt objects.
+    // object heap — serialize as a by-value table. Handles are position-independent, so
+    // the handles sitting in the restored slab/statics keep pointing at the rebuilt objects.
     const h = &g_vm_interp.?.heap;
     w.u32v(h.next_handle);
     w.u32v(h.instances.count());
@@ -1207,28 +1206,49 @@ pub fn loadState(in: []const u8) !void {
     if (try r.u32v() != ST_MAGIC) return error.BadMagic;
     if (try r.u32v() != ST_VERSION) return error.BadVersion;
 
-    // arena (object heap + slab + class statics)
-    const end_index = try r.usizev();
-    if (end_index > g_vm_arena.len) return error.ArenaOverflow;
-    @memcpy(g_vm_arena[0..end_index], try r.bytes(end_index));
-    g_vm_fba.end_index = end_index;
-
-    // interp Vm struct — preserve fields that point OUTSIDE the arena (set at boot)
+    // interp Vm struct — preserve every field that owns live host memory or points at
+    // boot-time state; only the by-value scalars/flags come from the dump. `slab`,
+    // `class_objects`, and `heap` keep their live allocations and have their CONTENTS
+    // rebuilt below (the dumped pointers are stale).
     const cur = &g_vm_interp.?;
     const keep_registry = cur.registry;
     const keep_native = cur.native_fn;
     const keep_fb = cur.framebuffer;
     const keep_exn = cur.exn_raw;
-    // The object heap lives on the gpa (off the FBA so the GC can free it). The dumped
-    // Vm struct's `heap` (map ptr/allocator into gpa) must NOT clobber the live one —
-    // we keep the live heap struct and rebuild its CONTENTS from the object table below.
     const keep_heap = cur.heap;
+    const keep_slab = cur.slab;
+    const keep_classes = cur.class_objects;
     @memcpy(std.mem.asBytes(cur), try r.bytes(@sizeOf(interp.Vm)));
     cur.registry = keep_registry;
     cur.native_fn = keep_native;
     cur.framebuffer = keep_fb;
     cur.exn_raw = keep_exn;
     cur.heap = keep_heap;
+    cur.slab = keep_slab;
+    cur.class_objects = keep_classes;
+
+    // operand slab contents
+    const slab_len = try r.usizev();
+    if (slab_len != cur.slab.len) return error.SlabSizeMismatch;
+    @memcpy(std.mem.sliceAsBytes(cur.slab), try r.bytes(slab_len * 4));
+
+    // class statics — destroy current ClassObjects, rebuild from the table
+    {
+        const A = cur.allocator;
+        var dit = cur.class_objects.valueIterator();
+        while (dit.next()) |pp| A.destroy(pp.*);
+        cur.class_objects.clearRetainingCapacity();
+        const co_count = try r.u32v();
+        var ci: u32 = 0;
+        while (ci < co_count) : (ci += 1) {
+            const hash = try r.u32v();
+            const co = try A.create(interp.ClassObject);
+            co.* = .{ .hash = hash };
+            for (&co.statics) |*s| s.* = try r.u32v();
+            co.class_handle = try r.u32v();
+            try cur.class_objects.put(hash, co);
+        }
+    }
 
     // composite heap
     const heap_len = try r.usizev();
