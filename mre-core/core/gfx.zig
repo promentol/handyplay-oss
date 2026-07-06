@@ -20,7 +20,12 @@ const fp_height = 7;
 const fp_trans_color = 12;
 const fp_flag = 0;
 
+/// Magenta transparent-key our image loader writes for alpha<128 pixels (see
+/// natives.zig gLoadImage). Kept in sync there.
+pub const trans_sentinel: u16 = 0xF81F;
+
 const max_layers = 16;
+const max_poly_points = 64;
 
 pub fn getRed(c: u16) u8 {
     return @intCast(((c >> 11) & 0x1F) << 3);
@@ -99,15 +104,20 @@ pub const Graphics = struct {
         return .{ .pixels = c.pixels, .w = c.w, .h = c.h, .flag = c.flag, .trans_color = c.trans_color };
     }
 
+    /// Resolve a canvas signature address from either a signature address or a
+    /// pixel address (== signature + canvas_data_offset). Null if neither matches.
+    fn signatureAddr(self: *Graphics, buf: u32) ?u32 {
+        const m = self.mem;
+        if (buf != 0 and buf + 9 <= m.buf.len and std.mem.eql(u8, m.buf[buf..][0..9], magic)) return buf;
+        if (buf >= canvas_data_offset and buf - canvas_data_offset + 9 <= m.buf.len and
+            std.mem.eql(u8, m.buf[buf - canvas_data_offset ..][0..9], magic)) return buf - canvas_data_offset;
+        return null;
+    }
+
     /// Accepts a signature address or a pixel address (== signature+32).
     fn findCanvas(self: *Graphics, buf: u32) ?Canvas {
         const m = self.mem;
-        var cs: u32 = undefined;
-        if (buf != 0 and std.mem.eql(u8, m.buf[buf..][0..9], magic)) {
-            cs = buf;
-        } else if (buf >= canvas_data_offset and std.mem.eql(u8, m.buf[buf - canvas_data_offset ..][0..9], magic)) {
-            cs = buf - canvas_data_offset;
-        } else return null;
+        const cs = self.signatureAddr(buf) orelse return null;
         const fp = cs + 12;
         return .{
             .pixels = cs + canvas_data_offset,
@@ -116,6 +126,14 @@ pub const Graphics = struct {
             .flag = m.buf[fp + fp_flag] != 0,
             .trans_color = m.readU16(fp + fp_trans_color),
         };
+    }
+
+    /// vm_graphic_get_frame_number: frames stored in the canvas signature (byte 9,
+    /// after the 9-byte magic). writeSignature seeds this to 1 for a decoded image;
+    /// true multi-frame GIF playback would decode and raise this. 0 => not a canvas.
+    pub fn frameNumber(self: *Graphics, buf: u32) i32 {
+        const cs = self.signatureAddr(buf) orelse return 0;
+        return self.mem.buf[cs + 9];
     }
 
     // --- layer management ----------------------------------------------------
@@ -160,15 +178,36 @@ pub const Graphics = struct {
         return 0;
     }
 
+    /// clear_layer_bg: fill the layer with its transparent color (the trans_color
+    /// passed to create_layer). Games call this per frame to reset a layer before
+    /// redrawing; the trans pixels are then skipped during flush_layer compositing.
+    pub fn clearLayerBg(self: *Graphics, handle: i32) i32 {
+        const idx: usize = if (handle < 0) self.active_layer else @intCast(handle);
+        if (idx >= self.layer_count) return -1;
+        const layer = self.layers[idx];
+        const color: u16 = @truncate(@as(u32, @bitCast(layer.trans_color)));
+        const n: u32 = @intCast(layer.w * layer.h);
+        var i: u32 = 0;
+        while (i < n) : (i += 1) self.mem.writeU16(layer.buf + i * 2, color);
+        return 0;
+    }
+
     pub fn flushLayer(self: *Graphics, handles: []const i32) i32 {
-        for (handles) |h| if (h < 0 or h >= self.layer_count) return -1;
+        // Resolve handles: a negative handle (-1) means the active layer.
+        var resolved: [max_layers]usize = undefined;
+        const n = handles.len;
+        for (handles, 0..) |h, i| {
+            const idx: usize = if (h < 0) self.active_layer else @intCast(h);
+            if (idx >= self.layer_count) return -1;
+            resolved[i] = idx;
+        }
         var sy: i32 = 0;
         while (sy < screen_h) : (sy += 1) {
             var sx: i32 = 0;
             while (sx < screen_w) : (sx += 1) {
-                var lid: isize = @as(isize, @intCast(handles.len)) - 1;
+                var lid: isize = @as(isize, @intCast(n)) - 1;
                 while (lid >= 0) : (lid -= 1) {
-                    const layer = self.layers[@intCast(handles[@intCast(lid)])];
+                    const layer = self.layers[resolved[@intCast(lid)]];
                     const lx = sx - layer.x;
                     const ly = sy - layer.y;
                     if (lx < 0 or lx >= layer.w or ly < 0 or ly >= layer.h) continue;
@@ -228,6 +267,69 @@ pub const Graphics = struct {
             while (sx < end_x) : (sx += 1) {
                 const edge = (sx == x or sy == y or sx == x + w - 1 or sy == y + h - 1);
                 self.putPixel(c, sx, sy, if (edge) line_color else back_color);
+            }
+        }
+    }
+
+    /// vm_graphic_fill_polygon: even-odd scanline fill of an N-point polygon into a
+    /// canvas, using the global pen color. Points are `vm_graphic_point {VMINT16 x,y}`
+    /// (4 bytes each) at `pts_emu` in guest memory. Honors the clip rect.
+    pub fn fillPolygon(self: *Graphics, buf: u32, pts_emu: u32, npoints: u32, color: u16) void {
+        const c = self.findCanvas(buf) orelse return;
+        const n = @min(npoints, @as(u32, max_poly_points));
+        if (n < 3) return;
+        var px: [max_poly_points]i32 = undefined;
+        var py: [max_poly_points]i32 = undefined;
+        var i: u32 = 0;
+        while (i < n) : (i += 1) {
+            px[i] = @as(i16, @bitCast(self.mem.readU16(pts_emu + i * 4)));
+            py[i] = @as(i16, @bitCast(self.mem.readU16(pts_emu + i * 4 + 2)));
+        }
+        const cb = self.clipBounds(c.w, c.h); // [left, top, right, bottom] (r/b exclusive)
+        var min_y = py[0];
+        var max_y = py[0];
+        var k: u32 = 1;
+        while (k < n) : (k += 1) {
+            min_y = @min(min_y, py[k]);
+            max_y = @max(max_y, py[k]);
+        }
+        min_y = @max(min_y, cb[1]);
+        max_y = @min(max_y, cb[3]);
+        var y = min_y;
+        while (y < max_y) : (y += 1) {
+            var xs: [max_poly_points]i32 = undefined;
+            var cnt: u32 = 0;
+            var a: u32 = 0;
+            while (a < n) : (a += 1) {
+                const b = (a + 1) % n;
+                var y0 = py[a];
+                var y1 = py[b];
+                var x0 = px[a];
+                var x1 = px[b];
+                if (y0 == y1) continue; // horizontal edge contributes no crossing
+                if (y0 > y1) {
+                    std.mem.swap(i32, &y0, &y1);
+                    std.mem.swap(i32, &x0, &x1);
+                }
+                if (y >= y0 and y < y1) { // half-open avoids double-counting vertices
+                    xs[cnt] = x0 + @divTrunc((y - y0) * (x1 - x0), (y1 - y0));
+                    cnt += 1;
+                }
+            }
+            // insertion sort the crossings
+            var s: u32 = 1;
+            while (s < cnt) : (s += 1) {
+                const key = xs[s];
+                var j: i32 = @as(i32, @intCast(s)) - 1;
+                while (j >= 0 and xs[@intCast(j)] > key) : (j -= 1) xs[@intCast(j + 1)] = xs[@intCast(j)];
+                xs[@intCast(j + 1)] = key;
+            }
+            var p: u32 = 0;
+            while (p + 1 < cnt) : (p += 2) {
+                const sx = @max(xs[p], cb[0]);
+                const ex = @min(xs[p + 1], cb[2]);
+                var xx = sx;
+                while (xx < ex) : (xx += 1) self.putPixel(c, xx, y, color);
             }
         }
     }
@@ -433,8 +535,26 @@ pub const Graphics = struct {
     }
 
     pub fn canvasSetTransColor(self: *Graphics, canvas: u32, trans: u16) i32 {
-        if (!std.mem.eql(u8, self.mem.buf[canvas..][0..9], magic)) return -1;
-        const fp = canvas + 12;
+        const cs = self.signatureAddr(canvas) orelse return -1;
+        const fp = cs + 12;
+        const old_flag = self.mem.buf[fp + fp_flag] != 0;
+        const old_trans = self.mem.readU16(fp + fp_trans_color);
+        // Our image loader marks alpha-transparent pixels with `trans_sentinel`
+        // (magenta) and keys on it. If a game overrides the key with a different
+        // color (e.g. Adam n Eve sets black), those sentinel pixels would no
+        // longer match the key and would render as opaque magenta. Migrate them
+        // to the new key so they stay transparent.
+        if (old_flag and old_trans == trans_sentinel and trans != trans_sentinel) {
+            const w = self.mem.readU16(fp + fp_width);
+            const h = self.mem.readU16(fp + fp_height);
+            const pixels = cs + canvas_data_offset;
+            var i: u32 = 0;
+            const n: u32 = @as(u32, w) * h;
+            while (i < n) : (i += 1) {
+                if (self.mem.readU16(pixels + i * 2) == trans_sentinel)
+                    self.mem.writeU16(pixels + i * 2, trans);
+            }
+        }
         self.mem.buf[fp + fp_flag] = 1;
         self.mem.writeU16(fp + fp_trans_color, trans);
         return 0;
@@ -451,6 +571,7 @@ pub const Graphics = struct {
     }
 
     pub fn charWidth(c: u16) i32 {
+        if (c < 0x20) return 0; // control chars are not printable (match textout)
         const off = glyphOffset(c);
         if (off == 0 or off >= font.len) return 0;
         return @as(i32, font[off] & 0xF) + 1;
@@ -458,6 +579,12 @@ pub const Graphics = struct {
 
     pub fn charHeight() i32 {
         return 16;
+    }
+
+    /// Baseline (ascent) of the 16px bitmap font: the row, measured from the glyph
+    /// top, on which characters sit. Used by vm_graphic_get_string_baseline.
+    pub fn charBaseline() i32 {
+        return 13;
     }
 
     /// Reads a UCS2-LE string from guest memory and sums widths.
@@ -492,6 +619,7 @@ pub const Graphics = struct {
             const ch = self.mem.readU16(p);
             if (ch == 0) break;
             p += 2;
+            if (ch < 0x20) continue; // C0 control chars (CR/LF/…) are not printable
             const off = glyphOffset(ch);
             if (off == 0 or off + 2 >= font.len) {
                 continue;
@@ -530,7 +658,9 @@ pub const Graphics = struct {
     // --- _ex helpers operating on the active layer + global color ------------
 
     pub fn activeBuf(self: *Graphics, handle: i32) ?u32 {
-        if (handle < 0 or handle >= self.layer_count) return null;
-        return self.layers[@intCast(handle)].buf;
+        // A negative handle (commonly -1) means "the current active layer".
+        const idx: usize = if (handle < 0) self.active_layer else @intCast(handle);
+        if (idx >= self.layer_count) return null;
+        return self.layers[idx].buf;
     }
 };

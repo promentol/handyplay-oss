@@ -16,6 +16,7 @@ const Vm = @import("vm.zig").Vm;
 const gfx = @import("gfx.zig");
 const cpu_mod = @import("cpu/unicorn.zig");
 const c = cpu_mod.c;
+const audio = @import("audio.zig");
 
 const MAGIC: u32 = 0x4D524553; // "MRES"
 const VERSION: u32 = 1;
@@ -211,4 +212,9 @@ pub fn load(vm: *Vm, in: []const u8) !void {
     g.clip = try r.readVal(@TypeOf(g.clip));
     g.layers = try r.readVal(@TypeOf(g.layers));
     @memcpy(std.mem.sliceAsBytes(g.screen), try r.readBytes(g.screen.len * 2));
+
+    // Audio state is not serialized (v1): drop any voices from the pre-load
+    // world so stale music doesn't play over the restored state. The game
+    // restarts audio from its own scene logic.
+    audio.reset();
 }

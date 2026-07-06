@@ -15,6 +15,17 @@ fn addUnicorn(mod: *std.Build.Module) void {
     mod.linkSystemLibrary("unicorn", .{});
 }
 
+/// Attach the vendored TinySoundFont (SF2 synth + SMF parser, plain C) that the
+/// core audio engine binds via core/tsf.zig. Native targets only — the wasm
+/// player build compiles the core with `zig build-obj` (no C sources) and the
+/// engine comptime-gates all tsf_*/tml_* references off for emscripten.
+fn addTsf(b: *std.Build, mod: *std.Build.Module) void {
+    mod.addIncludePath(.{ .cwd_relative = "../vendor/TinySoundFont" });
+    mod.addCSourceFile(.{ .file = b.path("core/tsf_impl.c"), .flags = &.{"-O2"} });
+    mod.addIncludePath(.{ .cwd_relative = "../vendor/minimp3" });
+    mod.addCSourceFile(.{ .file = b.path("core/mp3_impl.c"), .flags = &.{"-O2"} });
+}
+
 fn addSdl(mod: *std.Build.Module) void {
     mod.link_libc = true;
     mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
@@ -34,6 +45,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     addUnicorn(core);
+    addTsf(b, core);
 
     // helper to make a tool exe that imports core
     const Tool = struct {
@@ -73,6 +85,7 @@ pub fn build(b: *std.Build) void {
     Tool.add(b, core, target, optimize, "loadtest", "tools/loadtest.zig", "loadtest", "Load a .vxp and report its layout");
     Tool.add(b, core, target, optimize, "vxp2elf", "tools/vxp2elf.zig", "vxp2elf", "Load a .vxp and emit a relocated ELF for decompilers");
     Tool.add(b, core, target, optimize, "run", "tools/run.zig", "run", "Load and run a .vxp (headless, logs bridge calls)");
+    Tool.add(b, core, target, optimize, "natives-from-c", "tools/natives_from_c.zig", "natives-from-c", "Classify natives in a decompiled .c (implemented/stubbed/missing, verified/unverified)");
 
     // SDL3 live window
     const sdl_mod = b.createModule(.{ .root_source_file = b.path("frontends/sdl/main.zig"), .target = target, .optimize = optimize });
@@ -88,8 +101,15 @@ pub fn build(b: *std.Build) void {
     // Test the pure-logic modules directly (no Unicorn dependency): the Unicorn
     // cImport contains a C union with an opaque member that refAllDecls can't analyze.
     const test_step = b.step("test", "Run core unit tests");
-    for ([_][]const u8{ "core/memory.zig", "core/loader/tags.zig", "core/codecs/png.zig", "core/codecs/gif.zig" }) |root| {
+    for ([_][]const u8{ "core/memory.zig", "core/loader/tags.zig", "core/codecs/png.zig", "core/codecs/gif.zig", "core/codecs/wav.zig" }) |root| {
         const tmod = b.createModule(.{ .root_source_file = b.path(root), .target = target, .optimize = optimize });
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tmod })).step);
+    }
+    // audio engine tests need the tsf C implementation linked
+    {
+        const tmod = b.createModule(.{ .root_source_file = b.path("core/audio.zig"), .target = target, .optimize = optimize });
+        tmod.link_libc = true;
+        addTsf(b, tmod);
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tmod })).step);
     }
 

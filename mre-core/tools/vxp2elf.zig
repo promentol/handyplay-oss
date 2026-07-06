@@ -40,7 +40,7 @@ pub fn main() !void {
     const text_name: u32 = 1; // offset of ".text" in shstr
     const shstr_name: u32 = 7; // offset of ".shstrtab"
     const shstr_off = data_off + size;
-    const shoff = std.mem.alignForward(u32, shstr_off + shstr.len, 4);
+    const shoff = std.mem.alignForward(u32, shstr_off + @as(u32, shstr.len), 4);
 
     var out = try std.fs.cwd().createFile(args[2], .{ .truncate = true });
     defer out.close();

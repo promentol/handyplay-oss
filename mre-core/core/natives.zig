@@ -22,227 +22,257 @@ fn u(v: i32) u32 {
     return @bitCast(v);
 }
 
-pub fn registerAll(b: *Bridge) void {
-    const reg = struct {
-        b: *Bridge,
-        fn r(self: @This(), name: []const u8, h: *const fn (*Vm) void) void {
-            _ = self.b.register(name, h);
-        }
-        fn rs(self: @This(), name: []const u8, h: *const fn (*Vm) void) void {
-            _ = self.b.registerStub(name, h); // placeholder / constant-return
-        }
-    }{ .b = b };
-    const r = reg;
+/// Metadata for one native registration — the single source of truth for the table
+/// below AND offline tooling (imported directly, no text parsing). The old
+/// `// VERIFIED` / `// UNVERIFIED` line comments are now the structured `verified`
+/// boolean; the trailing comment keeps the human rationale.
+///   stub = false                 -> implemented (real handler)
+///   stub = true, verified = true   -> placeholder whose constant return is confirmed correct
+///   stub = true, verified = false  -> placeholder with an unconfirmed / guessed return
+pub const Native = struct {
+    name: []const u8,
+    handler: *const fn (*Vm) void,
+    stub: bool = false,
+    verified: bool = false,
+};
+
+pub const table = [_]Native{
+
+    // Stub (r.rs) verification status — surfaces in the STUBBED run report and the
+    // per-call "[bridge] STUBBED call:" log:
+    //   VERIFIED   — the constant return is confirmed correct/honest: SDK-doc-checked,
+    //                a void/no-op call, or the right value for a device/subsystem this
+    //                host genuinely cannot provide. No action needed.
+    //   UNVERIFIED — registered as a placeholder; its return is unconfirmed (a guess, or
+    //                a subsystem we could implement). Candidate for review — trace via the
+    //                STUBBED-call log when a game misbehaves.
 
     // ---- System ----
-    r.r("vm_get_time", getTime);
-    r.r("vm_get_curr_utc", getCurrUtc);
-    r.rs("vm_get_sys_time_zone", retZero);
-    r.rs("vm_get_malloc_stat", retZero);
-    r.r("vm_malloc", sysMalloc);
-    r.r("vm_calloc", sysCalloc);
-    r.r("vm_realloc", sysRealloc);
-    r.r("vm_free", sysFree);
-    r.r("vm_reg_sysevt_callback", regSysevt);
-    r.r("vm_get_mre_total_mem_size", getTotalMem);
-    r.r("vm_get_tick_count", getTickCount);
-    r.r("vm_get_exec_filename", getExecFilename);
-    r.r("vm_get_sys_property", getSysProperty);
-    r.rs("vm_get_vm_tag", retNeg1);
-    r.r("vm_app_log", appLog);
-    r.rs("vm_switch_power_saving_mode", retZero);
-    r.rs("vm_appmgr_is_installed", retZero);
-    r.r("vm_appmgr_get_installed_list", appmgrList);
-    r.r("vm_exit_app", exitApp);
-    r.rs("vm_send_sms", retZero); // SMS not supported
+    .{ .name = "vm_get_time", .handler = getTime },
+    .{ .name = "vm_get_curr_utc", .handler = getCurrUtc },
+    .{ .name = "vm_get_sys_time_zone", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — TZ offset guessed as 0 (UTC)
+    .{ .name = "vm_get_malloc_stat", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — heap stats not modeled
+    .{ .name = "vm_malloc", .handler = sysMalloc },
+    .{ .name = "vm_calloc", .handler = sysCalloc },
+    .{ .name = "vm_realloc", .handler = sysRealloc },
+    .{ .name = "vm_free", .handler = sysFree },
+    .{ .name = "vm_reg_sysevt_callback", .handler = regSysevt },
+    .{ .name = "vm_get_mre_total_mem_size", .handler = getTotalMem },
+    .{ .name = "vm_get_tick_count", .handler = getTickCount },
+    .{ .name = "vm_get_exec_filename", .handler = getExecFilename },
+    .{ .name = "vm_get_sys_property", .handler = getSysProperty },
+    .{ .name = "vm_get_vm_tag", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — VM tag value unconfirmed
+    .{ .name = "vm_app_log", .handler = appLog },
+    .{ .name = "vm_switch_power_saving_mode", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — no device power state; no-op is correct
+    .{ .name = "vm_appmgr_is_installed", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — always "not installed"; may affect self-install flows
+    .{ .name = "vm_appmgr_get_installed_list", .handler = appmgrList },
+    .{ .name = "vm_exit_app", .handler = exitApp },
+    .{ .name = "vm_send_sms", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — SMS absent; real send likely needs a completion event (see docs/sms_subsystem.md)
 
     // ---- Program manager / message ----
-    r.rs("vm_pmng_get_current_handle", retOne);
-    r.r("vm_reg_msg_proc", regMsgProc);
-    r.rs("vm_post_msg", retOne);
+    .{ .name = "vm_pmng_get_current_handle", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — handle value guessed as 1
+    .{ .name = "vm_reg_msg_proc", .handler = regMsgProc },
+    .{ .name = "vm_post_msg", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — message not actually queued
 
     // ---- Timer ----
-    r.r("vm_create_timer", createTimer);
-    r.r("vm_delete_timer", deleteTimer);
-    r.r("vm_create_timer_ex", createTimer);
-    r.r("vm_delete_timer_ex", deleteTimer);
+    .{ .name = "vm_create_timer", .handler = createTimer },
+    .{ .name = "vm_delete_timer", .handler = deleteTimer },
+    .{ .name = "vm_create_timer_ex", .handler = createTimer },
+    .{ .name = "vm_delete_timer_ex", .handler = deleteTimer },
 
     // ---- File / IO ----
-    r.r("vm_reg_keyboard_callback", regKeyboard);
-    r.r("vm_reg_pen_callback", regPen);
-    r.r("vm_file_open", fileOpen);
-    r.r("vm_file_close", fileClose);
-    r.r("vm_file_read", fileRead);
-    r.r("vm_file_write", fileWrite);
-    r.rs("vm_file_commit", retZero);
-    r.r("vm_file_seek", fileSeek);
-    r.r("vm_file_tell", fileTell);
-    r.r("vm_file_is_eof", fileIsEof);
-    r.r("vm_file_getfilesize", fileGetSize);
-    r.rs("vm_file_delete", retNeg1);
-    r.rs("vm_file_rename", retZero);
-    r.rs("vm_file_mkdir", retNeg1);
-    r.rs("vm_file_set_attributes", retZero);
-    r.rs("vm_file_get_attributes", retNeg1);
-    r.rs("vm_find_first", retNeg1);
-    r.rs("vm_find_next", retNeg1);
-    r.rs("vm_find_close", retZero);
-    r.rs("vm_find_first_ext", retNeg1);
-    r.rs("vm_find_next_ext", retNeg1);
-    r.rs("vm_find_close_ext", retZero);
-    r.rs("vm_file_get_modify_time", retNeg1);
-    r.rs("vm_get_removeable_driver", retEDrive);
-    r.rs("vm_get_system_driver", retCDrive);
-    r.r("vm_get_disk_free_space", diskFree);
-    r.rs("vm_get_disk_info", retNeg1);
-    r.rs("vm_is_support_keyborad", retOne);
-    r.r("vm_get_resource_offset_from_file", resOffsetFromFile);
+    .{ .name = "vm_reg_keyboard_callback", .handler = regKeyboard },
+    .{ .name = "vm_reg_pen_callback", .handler = regPen },
+    .{ .name = "vm_file_open", .handler = fileOpen },
+    .{ .name = "vm_file_close", .handler = fileClose },
+    .{ .name = "vm_file_read", .handler = fileRead },
+    .{ .name = "vm_file_write", .handler = fileWrite },
+    .{ .name = "vm_file_commit", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — flush of a memory-backed file is a no-op success (0)
+    .{ .name = "vm_file_seek", .handler = fileSeek },
+    .{ .name = "vm_file_tell", .handler = fileTell },
+    .{ .name = "vm_file_is_eof", .handler = fileIsEof },
+    .{ .name = "vm_file_getfilesize", .handler = fileGetSize },
+    .{ .name = "vm_file_delete", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — delete not implemented; returns failure
+    .{ .name = "vm_file_rename", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — rename not implemented; 0 may falsely signal success
+    .{ .name = "vm_file_mkdir", .handler = fileMkdir },
+    .{ .name = "vm_file_set_attributes", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — attributes ignored
+    .{ .name = "vm_file_get_attributes", .handler = fileGetAttributes },
+    .{ .name = "vm_find_first", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — directory enumeration not implemented (no matches)
+    .{ .name = "vm_find_next", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — directory enumeration not implemented
+    .{ .name = "vm_find_close", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: void return, nothing to close
+    .{ .name = "vm_find_first_ext", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — directory enumeration not implemented (no matches)
+    .{ .name = "vm_find_next_ext", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — directory enumeration not implemented
+    .{ .name = "vm_find_close_ext", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: void return, nothing to close
+    .{ .name = "vm_file_get_modify_time", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — mtime not tracked
+    .{ .name = "vm_get_removeable_driver", .handler = retEDrive, .stub = true, .verified = true }, // VERIFIED — doc: removable-disk drive letter ('e')
+    .{ .name = "vm_get_system_driver", .handler = retCDrive, .stub = true, .verified = true }, // VERIFIED — doc: phone/system-disk drive letter ('c')
+    .{ .name = "vm_get_disk_free_space", .handler = diskFree },
+    .{ .name = "vm_get_disk_info", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — disk geometry not modeled
+    .{ .name = "vm_is_support_keyborad", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — assumes a keypad is present
+    .{ .name = "vm_is_support_pen_touch", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: TRUE/FALSE; emulated keypad phone has no touch panel (FALSE)
+    .{ .name = "vm_get_resource_offset_from_file", .handler = resOffsetFromFile },
 
     // ---- SIM ----
-    r.rs("vm_get_operator", retZero);
-    r.rs("vm_has_sim_card", retOne);
-    r.r("vm_get_imei", getImei);
-    r.r("vm_get_imsi", getImsi);
-    r.rs("vm_sim_card_count", retOne);
-    r.r("vm_set_active_sim_card", simActiveSet);
-    r.r("vm_get_sim_card_status", simStatus);
-    r.r("vm_query_operator_code", queryOperator);
-    r.rs("vm_sim_get_active_sim_card", retOne);
-    r.rs("vm_sim_max_card_count", retOne);
-    r.rs("vm_sim_get_prefer_sim_card", retOne);
+    .{ .name = "vm_get_operator", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — no SIM; operator code faked as 0
+    .{ .name = "vm_has_sim_card", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — fakes a SIM present so games proceed
+    .{ .name = "vm_get_imei", .handler = getImei },
+    .{ .name = "vm_get_imsi", .handler = getImsi },
+    .{ .name = "vm_sim_card_count", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — fakes a single SIM
+    .{ .name = "vm_set_active_sim_card", .handler = simActiveSet },
+    .{ .name = "vm_get_sim_card_status", .handler = simStatus },
+    .{ .name = "vm_query_operator_code", .handler = queryOperator },
+    .{ .name = "vm_sim_get_active_sim_card", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — fakes active SIM #1
+    .{ .name = "vm_sim_max_card_count", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — fakes single-SIM device
+    .{ .name = "vm_sim_get_prefer_sim_card", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — fakes preferred SIM #1
 
     // ---- Graphics ----
-    r.r("vm_graphic_get_screen_width", gScreenW);
-    r.r("vm_graphic_get_screen_height", gScreenH);
-    r.r("vm_graphic_create_layer", gCreateLayer);
-    r.rs("vm_graphic_delete_layer", retZero);
-    r.r("vm_graphic_active_layer", gActiveLayer);
-    r.r("vm_graphic_get_layer_buffer", gGetLayerBuffer);
-    r.r("vm_graphic_flush_layer", gFlushLayer);
-    r.r("vm_graphic_flatten_layer", gFlushLayer);
-    r.r("vm_graphic_translate_layer", gTranslateLayer);
-    r.r("vm_graphic_get_bits_per_pixel", gBpp);
+    .{ .name = "vm_graphic_get_screen_width", .handler = gScreenW },
+    .{ .name = "vm_graphic_get_screen_height", .handler = gScreenH },
+    .{ .name = "vm_graphic_create_layer", .handler = gCreateLayer },
+    .{ .name = "vm_graphic_delete_layer", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — layer not actually freed/deregistered
+    .{ .name = "vm_graphic_active_layer", .handler = gActiveLayer },
+    .{ .name = "vm_graphic_get_layer_buffer", .handler = gGetLayerBuffer },
+    .{ .name = "vm_graphic_flush_layer", .handler = gFlushLayer },
+    .{ .name = "vm_graphic_flatten_layer", .handler = gFlushLayer },
+    .{ .name = "vm_graphic_clear_layer_bg", .handler = gClearLayerBg },
+    .{ .name = "vm_graphic_translate_layer", .handler = gTranslateLayer },
+    .{ .name = "vm_graphic_get_bits_per_pixel", .handler = gBpp },
     // NOTE: the reference's FUNCN_FIX macro registers the NON-_FIX symbol name
     // (the _FIX suffix is only on the C impl). Games call the unsuffixed names.
-    r.r("vm_graphic_create_canvas", gCreateCanvas);
-    r.r("vm_graphic_create_canvas_cf", gCreateCanvasCf);
-    r.r("vm_graphic_release_canvas", gReleaseCanvas);
-    r.r("vm_graphic_get_canvas_buffer", gGetCanvasBuffer);
-    r.r("vm_graphic_create_layer_ex", gCreateLayerEx);
-    r.r("vm_graphic_create_layer_cf", gCreateLayerCf);
-    r.r("vm_graphic_load_image", gLoadImage);
-    r.r("vm_graphic_get_img_property", gGetImgProperty);
-    r.r("vm_graphic_blt", gBlt);
-    r.r("vm_graphic_blt_ex", gBltEx);
-    r.r("vm_graphic_rotate", gRotate);
-    r.r("vm_graphic_mirror", gMirror);
-    r.r("vm_graphic_set_pixel", gSetPixel);
-    r.r("vm_graphic_set_pixel_ex", gSetPixelEx);
-    r.r("vm_graphic_line", gLine);
-    r.r("vm_graphic_line_ex", gLineEx);
-    r.r("vm_graphic_fill_rect", gFillRect);
-    r.r("vm_graphic_fill_rect_ex", gFillRectEx);
-    r.r("vm_graphic_roundrect", gRoundRect);
-    r.r("vm_graphic_roundrect_ex", gRoundRectEx);
-    r.r("vm_graphic_fill_roundrect", gFillRoundRect);
-    r.r("vm_graphic_fill_roundrect_ex", gFillRoundRectEx);
-    r.r("vm_graphic_rect", gRect);
-    r.r("vm_graphic_rect_ex", gRectEx);
-    r.rs("vm_graphic_fill_polygon", retZero); // polygon fill deferred
-    r.r("vm_graphic_set_clip", gSetClip);
-    r.r("vm_graphic_reset_clip", gResetClip);
-    r.r("vm_graphic_flush_screen", gFlushScreen);
-    r.rs("vm_graphic_is_r2l_state", retZero);
-    r.r("vm_graphic_setcolor", gSetColor);
-    r.r("vm_graphic_canvas_set_trans_color", gCanvasTrans);
-    r.r("vm_graphic_get_buffer", gGetBuffer);
-    r.rs("vm_initialize_screen_buffer", retZero);
+    .{ .name = "vm_graphic_create_canvas", .handler = gCreateCanvas },
+    .{ .name = "vm_graphic_create_canvas_cf", .handler = gCreateCanvasCf },
+    .{ .name = "vm_graphic_release_canvas", .handler = gReleaseCanvas },
+    .{ .name = "vm_graphic_get_canvas_buffer", .handler = gGetCanvasBuffer },
+    .{ .name = "vm_graphic_create_layer_ex", .handler = gCreateLayerEx },
+    .{ .name = "vm_graphic_create_layer_cf", .handler = gCreateLayerCf },
+    .{ .name = "vm_graphic_load_image", .handler = gLoadImage },
+    .{ .name = "vm_graphic_load_image_resized", .handler = gLoadImageResized },
+    .{ .name = "vm_graphic_get_img_property", .handler = gGetImgProperty },
+    .{ .name = "vm_graphic_get_frame_number", .handler = gGetFrameNumber },
+    .{ .name = "vm_graphic_blt", .handler = gBlt },
+    .{ .name = "vm_graphic_blt_ex", .handler = gBltEx },
+    .{ .name = "vm_graphic_rotate", .handler = gRotate },
+    .{ .name = "vm_graphic_mirror", .handler = gMirror },
+    .{ .name = "vm_graphic_set_pixel", .handler = gSetPixel },
+    .{ .name = "vm_graphic_set_pixel_ex", .handler = gSetPixelEx },
+    .{ .name = "vm_graphic_line", .handler = gLine },
+    .{ .name = "vm_graphic_line_ex", .handler = gLineEx },
+    .{ .name = "vm_graphic_fill_rect", .handler = gFillRect },
+    .{ .name = "vm_graphic_fill_rect_ex", .handler = gFillRectEx },
+    .{ .name = "vm_graphic_roundrect", .handler = gRoundRect },
+    .{ .name = "vm_graphic_roundrect_ex", .handler = gRoundRectEx },
+    .{ .name = "vm_graphic_fill_roundrect", .handler = gFillRoundRect },
+    .{ .name = "vm_graphic_fill_roundrect_ex", .handler = gFillRoundRectEx },
+    .{ .name = "vm_graphic_rect", .handler = gRect },
+    .{ .name = "vm_graphic_rect_ex", .handler = gRectEx },
+    .{ .name = "vm_graphic_fill_polygon", .handler = gFillPolygon },
+    .{ .name = "vm_graphic_set_clip", .handler = gSetClip },
+    .{ .name = "vm_graphic_reset_clip", .handler = gResetClip },
+    .{ .name = "vm_graphic_flush_screen", .handler = gFlushScreen },
+    .{ .name = "vm_graphic_is_r2l_state", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: 0 = not right-to-left; correct for LTR games
+    .{ .name = "vm_graphic_setcolor", .handler = gSetColor },
+    .{ .name = "vm_graphic_canvas_set_trans_color", .handler = gCanvasTrans },
+    .{ .name = "vm_graphic_get_buffer", .handler = gGetBuffer },
+    .{ .name = "vm_initialize_screen_buffer", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — no-op; screen buffer is init elsewhere (assumed unneeded)
 
     // ---- Textout ----
-    r.r("vm_graphic_get_character_height", gCharH);
-    r.r("vm_graphic_get_character_width", gCharW);
-    r.r("vm_graphic_get_string_width", gStringW);
-    r.r("vm_graphic_get_string_height", gCharH);
-    r.r("vm_graphic_measure_character", gMeasureChar);
-    r.rs("vm_graphic_get_character_info", retNeg1);
-    r.rs("vm_graphic_set_font", retZero);
-    r.r("vm_graphic_textout", gTextout);
-    r.r("vm_graphic_textout_by_baseline", gTextoutBaseline);
-    r.rs("vm_font_set_font_size", retZero);
-    r.rs("vm_font_set_font_style", retZero);
-    r.r("vm_graphic_textout_to_layer", gTextoutToLayer);
-    r.rs("vm_graphic_get_string_baseline", retZero);
-    r.rs("vm_graphic_is_use_vector_font", retZero);
-    r.r("vm_graphic_get_char_num_in_width", gCharNumInWidth);
+    .{ .name = "vm_graphic_get_character_height", .handler = gCharH },
+    .{ .name = "vm_graphic_get_character_width", .handler = gCharW },
+    .{ .name = "vm_graphic_get_string_width", .handler = gStringW },
+    .{ .name = "vm_graphic_get_string_height", .handler = gCharH },
+    .{ .name = "vm_graphic_measure_character", .handler = gMeasureChar },
+    .{ .name = "vm_graphic_get_character_info", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — per-char metrics struct not filled
+    .{ .name = "vm_graphic_set_font", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: void; fixed 16px bitmap font can't honor size
+    .{ .name = "vm_graphic_textout", .handler = gTextout },
+    .{ .name = "vm_graphic_textout_by_baseline", .handler = gTextoutBaseline },
+    .{ .name = "vm_font_set_font_size", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — fixed bitmap font; size not configurable (as set_font)
+    .{ .name = "vm_font_set_font_style", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: bold/italic valid only to vector font; 0 = VM_GDI_SUCCEED
+    .{ .name = "vm_graphic_textout_to_layer", .handler = gTextoutToLayer },
+    .{ .name = "vm_graphic_get_string_baseline", .handler = gGetStringBaseline },
+    .{ .name = "vm_graphic_is_use_vector_font", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — we render a bitmap font, so "not vector" (0) is correct
+    .{ .name = "vm_graphic_get_char_num_in_width", .handler = gCharNumInWidth },
 
     // ---- Resources ----
-    r.r("vm_load_resource", loadResource);
-    r.r("vm_resource_get_data", resourceGetData);
-    r.rs("vm_get_res_header", retEight);
+    .{ .name = "vm_load_resource", .handler = loadResource },
+    .{ .name = "vm_resource_get_data", .handler = resourceGetData },
+    .{ .name = "vm_get_res_header", .handler = retEight, .stub = true, .verified = false }, // UNVERIFIED — returns constant 8 (header size guessed)
+    .{ .name = "vm_reg_res_provider", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: void; registers a guest resource callback consulted only by resid-based loaders (vm_midi_play etc.), which are themselves stubbed, so storing it is a no-op today
 
     // ---- CharSet ----
-    r.r("vm_ucs2_to_gb2312", ucs2ToAscii);
-    r.r("vm_gb2312_to_ucs2", asciiToUcs2);
-    r.r("vm_ucs2_to_ascii", ucs2ToAscii);
-    r.r("vm_ascii_to_ucs2", asciiToUcs2);
-    r.rs("vm_chset_convert", retZero);
-    r.rs("vm_get_language", retOne);
-    r.r("vm_get_language_ssc", langSsc);
-    r.r("vm_ucs2_string", ucs2String);
+    .{ .name = "vm_ucs2_to_gb2312", .handler = ucs2ToAscii },
+    .{ .name = "vm_gb2312_to_ucs2", .handler = asciiToUcs2 },
+    .{ .name = "vm_ucs2_to_ascii", .handler = ucs2ToAscii },
+    .{ .name = "vm_ascii_to_ucs2", .handler = asciiToUcs2 },
+    .{ .name = "vm_chset_convert", .handler = chsetConvert },
+    .{ .name = "vm_get_language", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — language id faked (assumed English)
+    .{ .name = "vm_get_language_ssc", .handler = langSsc },
+    .{ .name = "vm_ucs2_string", .handler = ucs2String },
 
     // ---- STDLib ----
-    r.r("vm_wstrlen", wstrlen);
-    r.r("vm_wstrcpy", wstrcpy);
-    r.r("vm_wstrncpy", wstrncpy);
-    r.r("vm_wstrcat", wstrcat);
-    r.r("vm_wstrcmp", wstrcmp);
+    .{ .name = "vm_wstrlen", .handler = wstrlen },
+    .{ .name = "vm_wstrcpy", .handler = wstrcpy },
+    .{ .name = "vm_wstrncpy", .handler = wstrncpy },
+    .{ .name = "vm_wstrcat", .handler = wstrcat },
+    .{ .name = "vm_wstrcmp", .handler = wstrcmp },
+    .{ .name = "vm_get_filename", .handler = getFilename },
 
     // ---- Audio ----
-    r.r("vm_set_volume", setVolume);
-    r.r("vm_get_volume", getVolume);
-    r.r("vm_audio_play_bytes_no_block", audioPlay);
-    r.r("vm_audio_stop_all", audioStopAll);
-    r.r("vm_audio_mixed_close", audioClose);
-    r.r("vm_audio_mixed_close_all", audioStopAll);
+    .{ .name = "vm_set_volume", .handler = setVolume },
+    .{ .name = "vm_get_volume", .handler = getVolume },
+    .{ .name = "vm_audio_play_bytes_no_block", .handler = audioPlay },
+    .{ .name = "vm_audio_stop_all", .handler = audioStopAll },
+    .{ .name = "vm_audio_mixed_close", .handler = audioClose },
+    .{ .name = "vm_audio_mixed_close_all", .handler = audioStopAll },
+    .{ .name = "vm_audio_suspend_bg_play", .handler = audioSuspendBg }, // [reconstructed]
+    .{ .name = "vm_audio_resume_bg_play", .handler = audioResumeBg }, // [reconstructed]
     // legacy MIDI/bitstream APIs (route to the same backend where sensible)
-    r.rs("vm_midi_play_by_bytes", retOne);
-    r.rs("vm_midi_play_by_bytes_ex", retOne);
-    r.rs("vm_midi_pause", retZero);
-    r.rs("vm_midi_get_time", retZero);
-    r.rs("vm_midi_stop", retZero);
-    r.rs("vm_midi_stop_all", retZero);
-    r.rs("vm_bitstream_audio_open", retZero);
-    r.rs("vm_bitstream_audio_open_pcm", retZero);
-    r.rs("vm_bitstream_audio_finished", retZero);
-    r.rs("vm_bitstream_audio_close", retZero);
-    r.rs("vm_bitstream_audio_get_buffer_status", retZero);
-    r.rs("vm_bitstream_audio_put_data", retZero);
-    r.rs("vm_bitstream_audio_start", retZero);
-    r.rs("vm_bitstream_audio_stop", retZero);
-    r.rs("vm_bitstream_audio_get_play_time", retZero);
-    r.rs("ext_media_setbufer", retZero);
-    r.rs("ext_media_getreadbuffer", retZero);
-    r.rs("ext_media_record", retZero);
-    r.rs("ext_media_readdatadone", retZero);
-    r.rs("ext_media_stop", retZero);
+    .{ .name = "vm_midi_play", .handler = retNeg1, .stub = true, .verified = true }, // VERIFIED — doc: plays MIDI by resource id via the reg_res_provider callback; resid→bytes + guest-callback invocation not wired, so report VM_MIDI_FAILED (-1)
+    .{ .name = "vm_midi_play_by_bytes", .handler = midiPlayBytes },
+    .{ .name = "vm_midi_play_by_bytes_ex", .handler = midiPlayBytesEx },
+    .{ .name = "vm_midi_pause", .handler = midiPause },
+    .{ .name = "vm_midi_resume", .handler = midiResume },
+    .{ .name = "vm_midi_get_time", .handler = midiGetTime },
+    .{ .name = "vm_midi_stop", .handler = midiStop },
+    .{ .name = "vm_midi_stop_all", .handler = midiStopAll },
+    .{ .name = "vm_bitstream_audio_open", .handler = bsOpen },
+    .{ .name = "vm_bitstream_audio_open_pcm", .handler = bsOpenPcm },
+    .{ .name = "vm_bitstream_audio_finished", .handler = bsFinished },
+    .{ .name = "vm_bitstream_audio_close", .handler = bsClose },
+    .{ .name = "vm_bitstream_audio_get_buffer_status", .handler = bsStatus },
+    .{ .name = "vm_bitstream_audio_put_data", .handler = bsPutData },
+    .{ .name = "vm_bitstream_audio_start", .handler = bsStart },
+    .{ .name = "vm_bitstream_audio_stop", .handler = bsStop },
+    .{ .name = "vm_bitstream_audio_get_play_time", .handler = bsGetPlayTime },
+    .{ .name = "vm_bitstream_audio_put_frame", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — absent on real device too (Gold Miner)
+    .{ .name = "ext_media_setbufer", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — media capture/record not modeled
+    .{ .name = "ext_media_getreadbuffer", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — media capture/record not modeled
+    .{ .name = "ext_media_record", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — media capture/record not modeled
+    .{ .name = "ext_media_readdatadone", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — media capture/record not modeled
+    .{ .name = "ext_media_stop", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — media capture/record not modeled
 
     // ---- Socket / network (stubbed: no host network) ----
-    r.rs("vm_is_support_wifi", retOne);
-    r.rs("vm_wifi_is_connected", retOne);
-    r.rs("vm_soc_get_host_by_name", retNeg1);
-    r.rs("vm_tcp_connect", retNeg1);
-    r.rs("vm_tcp_close", retZero);
-    r.rs("vm_tcp_read", retZero);
-    r.rs("vm_tcp_write", retZero);
+    .{ .name = "vm_is_support_wifi", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — claims WiFi supported; inconsistent with no-network design
+    .{ .name = "vm_wifi_is_connected", .handler = retOne, .stub = true, .verified = false }, // UNVERIFIED — claims connected despite no network (suspect; likely should be 0)
+    .{ .name = "vm_soc_get_host_by_name", .handler = retNeg1, .stub = true, .verified = true }, // VERIFIED — no network: DNS resolve fails (-1)
+    .{ .name = "vm_tcp_connect", .handler = retNeg1, .stub = true, .verified = true }, // VERIFIED — no network: connect fails (-1)
+    .{ .name = "vm_tcp_close", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — close no-op success
+    .{ .name = "vm_tcp_read", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — 0 bytes; unreachable if connect fails, EOF-vs-error ambiguous
+    .{ .name = "vm_tcp_write", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — 0 bytes; unreachable if connect fails
 
     // ---- Misc ----
-    r.r("srand", srand);
-    r.r("rand", rand);
+    .{ .name = "srand", .handler = srand },
+    .{ .name = "rand", .handler = rand },
 
     // ---- ARModule memory (stdio helper) ----
-    r.r("armodule_malloc", armMalloc);
-    r.r("armodule_realloc", armRealloc);
-    r.r("armodule_free", armFree);
+    .{ .name = "armodule_malloc", .handler = armMalloc },
+    .{ .name = "armodule_realloc", .handler = armRealloc },
+    .{ .name = "armodule_free", .handler = armFree },
+};
+
+pub fn registerAll(b: *Bridge) void {
+    for (table) |e| {
+        _ = if (e.stub) b.registerStub(e.name, e.handler) else b.register(e.name, e.handler);
+    }
 }
 
 // ---- generic returns -------------------------------------------------------
@@ -343,19 +373,26 @@ fn regMsgProc(vm: *Vm) void {
 fn createTimer(vm: *Vm) void {
     const interval = vm.arg(0);
     const cb = vm.arg(1);
-    if (std.posix.getenv("LOG_FILES") != null)
-        std.debug.print("[timer] create interval={d}ms cb=0x{x:0>8}\n", .{ interval, cb });
     for (&vm.timers, 0..) |*t, id| {
         if (!t.active) {
             t.* = .{ .active = true, .interval = interval, .accum = 0, .cb = cb };
-            return vm.setRet(@intCast(id));
+            if (std.posix.getenv("LOG_FILES") != null)
+                std.debug.print("[timer] create handle={d} interval={d}ms cb=0x{x:0>8}\n", .{ id + 1, interval, cb });
+            // MRE timer handles are 1-based: the doc guarantees a successful
+            // handle is > 0. Returning a 0-based slot index makes the first
+            // timer's handle 0, which games read as "no timer / failed" — they
+            // then never delete it (guarded `if (handle) vm_delete_timer(handle)`),
+            // orphaning the callback so it keeps firing on freed state.
+            return vm.setRet(@intCast(id + 1));
         }
     }
     vm.setRet(u(-1));
 }
 fn deleteTimer(vm: *Vm) void {
-    const id = vm.arg(0);
-    if (id < vm.timers.len) vm.timers[id].active = false;
+    const handle = vm.arg(0);
+    if (std.posix.getenv("LOG_FILES") != null)
+        std.debug.print("[timer] delete handle={d}\n", .{handle});
+    if (handle >= 1 and handle - 1 < vm.timers.len) vm.timers[handle - 1].active = false;
     vm.setRet(0);
 }
 
@@ -402,6 +439,61 @@ fn openVFile(vm: *Vm, name_emu: u32, mode: u32) ?vmmod.VFile {
     else
         std.fs.cwd().openFile(path, .{}) catch return null;
     return .{ .file = f };
+}
+
+// ---- filesystem attributes / mkdir (recovered) ----
+const VM_FS_ATTR_DIR: u32 = 0x10; // [reconstructed constant]
+const VM_FS_ATTR_READ_ONLY: u32 = 0x01; // [reconstructed constant]
+
+/// [reconstructed] Resolve emulated "C:\path" -> host "fs/c/path" slice in `out`.
+/// Mirrors openVFile's inline path translation (drive letter -> lowercase dir).
+fn hostPath(vm: *Vm, name_emu: u32, out: *[600]u8) ?[]const u8 {
+    var ucs2_buf: [512]u8 = undefined;
+    const name = vm.readUcs2(name_emu, &ucs2_buf);
+    if (name.len < 3 or name[1] != ':') return null;
+    const prefix = "fs/";
+    @memcpy(out[0..prefix.len], prefix);
+    var w: usize = prefix.len;
+    out[w] = std.ascii.toLower(name[0]);
+    w += 1;
+    for (name[2..]) |ch| {
+        out[w] = if (ch == '\\') '/' else ch;
+        w += 1;
+    }
+    return out[0..w];
+}
+
+/// [reconstructed] Debug bisect switch: MRE_FS_COMPAT=1 restores the old stub
+/// behavior (return -1) to isolate fs-related regressions.
+fn fsCompat() bool {
+    return std.posix.getenv("MRE_FS_COMPAT") != null;
+}
+
+fn fileMkdir(vm: *Vm) void { // [reconstructed body]
+    if (fsCompat()) return vm.setRet(u(-1));
+    var host: [600]u8 = undefined;
+    const path = hostPath(vm, vm.arg(0), &host) orelse return vm.setRet(u(-1));
+    std.fs.cwd().makeDir(path) catch return vm.setRet(u(-1));
+    vm.setRet(0);
+}
+fn fileGetAttributes(vm: *Vm) void { // recovered exactly from transcript
+    if (fsCompat()) return vm.setRet(u(-1));
+    // vm_file_get_attributes(filename) -> attr bits, or -1 if it doesn't exist.
+    var host: [600]u8 = undefined;
+    const path = hostPath(vm, vm.arg(0), &host) orelse return vm.setRet(u(-1));
+    if (std.fs.cwd().openDir(path, .{})) |d| {
+        var dir = d;
+        dir.close();
+        flog("[file] attrs '{s}' -> DIR\n", .{path});
+        return vm.setRet(VM_FS_ATTR_DIR);
+    } else |_| {}
+    const st = std.fs.cwd().statFile(path) catch {
+        flog("[file] attrs '{s}' -> missing\n", .{path});
+        return vm.setRet(u(-1));
+    };
+    const ro: u32 = if (st.mode != 0 and (st.mode & 0o200) == 0) VM_FS_ATTR_READ_ONLY else 0;
+    flog("[file] attrs '{s}' -> file\n", .{path});
+    vm.setRet(ro);
 }
 
 var file_log_budget: u32 = 60;
@@ -543,6 +635,9 @@ fn gFlushLayer(vm: *Vm) void {
     while (k < count) : (k += 1) handles[k] = s(vm.mem.readU32(arr + k * 4));
     vm.setRet(u(vm.gfx.flushLayer(handles[0..count])));
 }
+fn gClearLayerBg(vm: *Vm) void {
+    vm.setRet(u(vm.gfx.clearLayerBg(s(vm.arg(0)))));
+}
 fn gTranslateLayer(vm: *Vm) void {
     vm.setRet(u(vm.gfx.translateLayer(s(vm.arg(0)), s(vm.arg(1)), s(vm.arg(2)))));
 }
@@ -571,6 +666,13 @@ fn gFillRect(vm: *Vm) void {
 fn gFillRectEx(vm: *Vm) void {
     if (vm.gfx.activeBuf(s(vm.arg(0)))) |buf|
         vm.gfx.fillRect(buf, s(vm.arg(1)), s(vm.arg(2)), s(vm.arg(3)), s(vm.arg(4)), vm.gfx.global_color, vm.gfx.global_color);
+    vm.setRet(0);
+}
+fn gFillPolygon(vm: *Vm) void {
+    // arg0 = layer handle (-1 = active layer); arg1 = point array; arg2 = point count.
+    // Uses the global pen color, like the other _ex fills.
+    if (vm.gfx.activeBuf(s(vm.arg(0)))) |buf|
+        vm.gfx.fillPolygon(buf, vm.arg(1), vm.arg(2), vm.gfx.global_color);
     vm.setRet(0);
 }
 fn gRect(vm: *Vm) void {
@@ -634,17 +736,17 @@ fn gGetBuffer(vm: *Vm) void {
     vm.setRet(vm.gfx.screenBuffer());
 }
 fn gSetColor(vm: *Vm) void {
-    // vm_graphic_color struct: the 565 value is the last u16 field; read it via a
-    // best-effort offset. Layout {VMBYTE type; argb(4); VMUINT16 565} => 565 at +5.
+    // vm_graphic_color = { VMUINT vm_color_565; VMUINT vm_color_888; }
+    // The 565 value is the low 16 bits of the first field (offset 0).
     const p = vm.arg(0);
-    vm.gfx.global_color = vm.mem.readU16(p + 5);
+    vm.gfx.global_color = @truncate(vm.mem.readU32(p));
     vm.setRet(0);
 }
 fn gCanvasTrans(vm: *Vm) void {
     vm.setRet(u(vm.gfx.canvasSetTransColor(vm.arg(0), @truncate(vm.arg(1)))));
 }
 
-const trans_sentinel: u16 = 0xF81F; // magenta — transparent-key for alpha pixels
+const trans_sentinel: u16 = gfx.trans_sentinel; // magenta — transparent-key for alpha pixels
 
 fn gLoadImage(vm: *Vm) void {
     const img = vm.arg(0);
@@ -688,6 +790,54 @@ fn gLoadImage(vm: *Vm) void {
     vm.setRet(canvas);
 }
 
+fn gLoadImageResized(vm: *Vm) void {
+    // vm_graphic_load_image_resized(img_data, img_len, width, height): decode
+    // like vm_graphic_load_image, then nearest-neighbor scale to width x height.
+    // Doc types the return VM_GDI_RESULT, but games use it as the canvas display
+    // buffer pointer (same as load_image) — a non-zero pointer serves both.
+    const img = vm.arg(0);
+    const len = vm.arg(1);
+    const dw: u32 = vm.arg(2);
+    const dh: u32 = vm.arg(3);
+    if (img == 0 or len == 0 or dw == 0 or dh == 0) return vm.setRet(0);
+    const bytes = vm.mem.slice(img, len);
+
+    const Decoded = struct { w: u32, h: u32, rgba: []u8 };
+    const decoded: Decoded = blk: {
+        if (png.decode(vm.gpa, bytes)) |d| break :blk .{ .w = d.w, .h = d.h, .rgba = d.rgba } else |_| {}
+        if (gif.decode(vm.gpa, bytes)) |d| break :blk .{ .w = d.w, .h = d.h, .rgba = d.rgba } else |_| {}
+        if (bytes.len >= 2) std.debug.print("[load_image_resized] unsupported magic {x:0>2}{x:0>2}\n", .{ bytes[0], bytes[1] });
+        return vm.setRet(0);
+    };
+    defer vm.gpa.free(decoded.rgba);
+    if (std.posix.getenv("DIAG") != null)
+        std.debug.print("[load_image_resized] {d}x{d} -> {d}x{d}\n", .{ decoded.w, decoded.h, dw, dh });
+
+    const canvas = vm.gfx.createCanvas(appMallocThunk, vm, @intCast(dw), @intCast(dh));
+    if (canvas == 0) return vm.setRet(0);
+
+    const pixels = canvas + gfx.canvas_data_offset;
+    var has_trans = false;
+    var dy: u32 = 0;
+    while (dy < dh) : (dy += 1) {
+        // Map destination pixel back to the nearest source pixel.
+        const sy = if (dh == 1) 0 else dy * decoded.h / dh;
+        var dx: u32 = 0;
+        while (dx < dw) : (dx += 1) {
+            const sx = if (dw == 1) 0 else dx * decoded.w / dw;
+            const o = (sy * decoded.w + sx) * 4;
+            var c565: u16 = gfx.rgb565(decoded.rgba[o], decoded.rgba[o + 1], decoded.rgba[o + 2]);
+            if (decoded.rgba[o + 3] < 128) {
+                c565 = trans_sentinel;
+                has_trans = true;
+            }
+            vm.mem.writeU16(pixels + (dy * dw + dx) * 2, c565);
+        }
+    }
+    if (has_trans) _ = vm.gfx.canvasSetTransColor(canvas, trans_sentinel);
+    vm.setRet(canvas);
+}
+
 fn appMallocThunk(ctx: *anyopaque, size: u32) u32 {
     const vm: *Vm = @ptrCast(@alignCast(ctx));
     const a = appArena(vm) orelse return 0;
@@ -716,6 +866,10 @@ fn gGetImgProperty(vm: *Vm) void {
     m.writeU16(sc + 14, info.trans_color);
     m.writeU32(sc + 16, @intCast(info.w * info.h * 2));
     vm.setRet(sc);
+}
+fn gGetFrameNumber(vm: *Vm) void {
+    // arg0 = canvas handle from vm_graphic_load_image; return its frame count.
+    vm.setRet(u(vm.gfx.frameNumber(vm.arg(0))));
 }
 fn gGetCanvasBuffer(vm: *Vm) void {
     vm.setRet(vm.arg(0)); // canvas pointer already addresses the signature
@@ -758,6 +912,10 @@ fn gTextoutBaseline(vm: *Vm) void {
     // baseline arg ignored; render at y
     vm.gfx.textout(vm.arg(0), s(vm.arg(1)), s(vm.arg(2)), vm.arg(3), s(vm.arg(4)), @truncate(vm.arg(5)));
     vm.setRet(0);
+}
+fn gGetStringBaseline(vm: *Vm) void {
+    // Fixed bitmap font: baseline is a constant independent of the string arg.
+    vm.setRet(u(gfx.Graphics.charBaseline()));
 }
 fn gTextoutToLayer(vm: *Vm) void {
     if (vm.gfx.activeBuf(s(vm.arg(0)))) |buf|
@@ -816,6 +974,99 @@ fn ucs2ToAscii(vm: *Vm) void {
     }
     vm.setRet(0);
 }
+// vm_chset_enum indices we care about (VM_CHSET_BASE = 0):
+const CHSET_ASCII = 1;
+const CHSET_UTF16LE = 35;
+const CHSET_UTF8 = 37;
+const CHSET_UCS2 = 38;
+
+// vm_chset_convert(src_type, dst_type, src, dst, dst_size): transcode a
+// null-terminated string between character sets, writing dst with a terminator.
+// Covers the sets games actually use — wide (UCS2/UTF16LE), UTF8, and single-byte
+// (ASCII/Latin, treated as codepoint == byte). Returns 0 (VM_CHSET_CONVERT_SUCCESS).
+fn chsetConvert(vm: *Vm) void {
+    const src_type = vm.arg(0);
+    const dst_type = vm.arg(1);
+    var sp = vm.arg(2);
+    var dp = vm.arg(3);
+    const dst_size = vm.arg(4);
+    const m = vm.mem;
+    if (sp == 0 or dp == 0 or dst_size < 1) return vm.setRet(1); // VM_CHSET_CONVERT_ERR_PARAM
+    const src_wide = src_type == CHSET_UCS2 or src_type == CHSET_UTF16LE;
+    const dst_wide = dst_type == CHSET_UCS2 or dst_type == CHSET_UTF16LE;
+    const dst_end = dp + dst_size;
+    const mem_end: u32 = @intCast(m.buf.len);
+
+    var first = true;
+    while (true) {
+        // --- decode one codepoint from src ---
+        var cp: u32 = 0;
+        if (src_wide) {
+            if (sp + 2 > mem_end) break;
+            cp = m.readU16(sp);
+            sp += 2;
+        } else {
+            if (sp >= mem_end) break;
+            const b0 = m.buf[sp];
+            if (src_type == CHSET_UTF8 and b0 >= 0x80) {
+                if (b0 & 0xE0 == 0xC0 and sp + 2 <= mem_end) {
+                    cp = (@as(u32, b0 & 0x1F) << 6) | (m.buf[sp + 1] & 0x3F);
+                    sp += 2;
+                } else if (b0 & 0xF0 == 0xE0 and sp + 3 <= mem_end) {
+                    cp = (@as(u32, b0 & 0x0F) << 12) | (@as(u32, m.buf[sp + 1] & 0x3F) << 6) | (m.buf[sp + 2] & 0x3F);
+                    sp += 3;
+                } else {
+                    cp = b0;
+                    sp += 1;
+                }
+            } else {
+                cp = b0; // ASCII / Latin single-byte
+                sp += 1;
+            }
+        }
+        if (cp == 0) break;
+        if (first) {
+            first = false;
+            if (cp == 0xFEFF) continue; // strip a leading byte-order mark (real converters do)
+        }
+
+        // --- encode the codepoint into dst ---
+        if (dst_wide) {
+            if (dp + 2 > dst_end) break;
+            m.writeU16(dp, @intCast(cp & 0xFFFF));
+            dp += 2;
+        } else if (dst_type == CHSET_UTF8) {
+            if (cp < 0x80) {
+                if (dp + 1 > dst_end) break;
+                m.buf[dp] = @intCast(cp);
+                dp += 1;
+            } else if (cp < 0x800) {
+                if (dp + 2 > dst_end) break;
+                m.buf[dp] = @intCast(0xC0 | (cp >> 6));
+                m.buf[dp + 1] = @intCast(0x80 | (cp & 0x3F));
+                dp += 2;
+            } else {
+                if (dp + 3 > dst_end) break;
+                m.buf[dp] = @intCast(0xE0 | (cp >> 12));
+                m.buf[dp + 1] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+                m.buf[dp + 2] = @intCast(0x80 | (cp & 0x3F));
+                dp += 3;
+            }
+        } else {
+            if (dp + 1 > dst_end) break;
+            m.buf[dp] = @intCast(cp & 0xFF); // ASCII / Latin
+            dp += 1;
+        }
+    }
+
+    // write the terminator (wide = u16 0, else byte 0), space permitting
+    if (dst_wide) {
+        if (dp + 2 <= dst_end) m.writeU16(dp, 0);
+    } else if (dp < dst_end) {
+        m.buf[dp] = 0;
+    }
+    vm.setRet(0); // VM_CHSET_CONVERT_SUCCESS
+}
 fn asciiToUcs2(vm: *Vm) void {
     const dst = vm.arg(0);
     const size = vm.arg(1);
@@ -825,6 +1076,31 @@ fn asciiToUcs2(vm: *Vm) void {
         const c = vm.mem.buf[src + i];
         vm.mem.writeU16(dst + i * 2, c);
         if (c == 0) break;
+    }
+    vm.setRet(0);
+}
+fn getFilename(vm: *Vm) void {
+    // vm_get_filename(VMWSTR path, VMWSTR filename): copy the basename (part after
+    // the last '\' or '/') of a UCS2 path into the [OUT] filename buffer. Operates
+    // on 16-bit code units directly so non-ASCII names survive. Returns void.
+    const path = vm.arg(0);
+    const out = vm.arg(1);
+    if (path == 0 or out == 0) return vm.setRet(0);
+    // Locate the code unit after the last path separator.
+    var i: u32 = 0;
+    var start: u32 = 0;
+    while (true) : (i += 1) {
+        const ch = vm.mem.readU16(path + i * 2);
+        if (ch == 0) break;
+        if (ch == '\\' or ch == '/') start = i + 1;
+    }
+    var j: u32 = start;
+    var w: u32 = 0;
+    while (true) : (j += 1) {
+        const ch = vm.mem.readU16(path + j * 2);
+        vm.mem.writeU16(out + w * 2, ch);
+        w += 1;
+        if (ch == 0) break;
     }
     vm.setRet(0);
 }
@@ -927,14 +1203,169 @@ fn audioPlay(vm: *Vm) void {
         for (clip[0..@min(clip.len, 12)]) |b| std.debug.print("{x:0>2} ", .{b});
         std.debug.print("\n", .{});
     }
-    vm.setRet(u(audio.play(clip, format)));
+    // [reconstructed to match current audio.zig clip* API — review args]
+    vm.setRet(u(audio.clipPlay(clip, format, 0, vm.arg(4))));
 }
 fn audioStopAll(vm: *Vm) void {
-    audio.stopAll();
+    audio.clipCloseAll(); // [reconstructed: was audio.stopAll()]
     vm.setRet(0);
 }
 fn audioClose(vm: *Vm) void {
-    audio.close(s(vm.arg(0)));
+    audio.clipClose(s(vm.arg(0))); // [reconstructed: was audio.close()]
+    vm.setRet(0);
+}
+// [reconstructed] vm_audio_{suspend,resume}_bg_play -> audio.zig bg controls.
+fn audioSuspendBg(vm: *Vm) void {
+    audio.suspendBg();
+    vm.setRet(0);
+}
+fn audioResumeBg(vm: *Vm) void {
+    audio.resumeBg();
+    vm.setRet(0);
+}
+
+// -- MIDI (vm_midi_*) --
+// NOTE: midiCompat() and logClip() were reconstructed (not captured in recovery);
+// review these two helpers. All handlers below are the recovered originals.
+fn midiCompat() bool {
+    // Debug bisect switch: MRE_MIDI_COMPAT=1 restores the old constant-return
+    // stubs (bypasses the real MIDI backend).
+    return std.posix.getenv("MRE_MIDI_COMPAT") != null;
+}
+fn logClip(clip: []const u8, tag: u8) void {
+    if (std.posix.getenv("AUDIO_LOG") == null) return;
+    std.debug.print("[audio] midi tag=0x{x:0>2} len={d} magic=", .{ tag, clip.len });
+    for (clip[0..@min(clip.len, 12)]) |b| std.debug.print("{x:0>2} ", .{b});
+    std.debug.print("\n", .{});
+}
+fn midiPlayBytes(vm: *Vm) void {
+    if (midiCompat()) return vm.setRet(1);
+    // vm_midi_play_by_bytes(midibuf, len, repeat, void(*f)(handle, event)) -> handle
+    const data = vm.arg(0);
+    const len = vm.arg(1);
+    const repeat: i32 = @bitCast(vm.arg(2));
+    const cb = vm.arg(3);
+    if (data == 0 or len == 0) return vm.setRet(u(-1));
+    const clip = vm.mem.slice(data, len);
+    logClip(clip, 0xFF);
+    vm.setRet(u(audio.midiPlay(clip, data, 0, repeat, cb)));
+}
+fn midiPlayBytesEx(vm: *Vm) void {
+    if (midiCompat()) return vm.setRet(1);
+    // vm_midi_play_by_bytes_ex(midibuf, len, start_time, repeat, path, cb) -> handle
+    const data = vm.arg(0);
+    const len = vm.arg(1);
+    const start_ms = vm.arg(2);
+    const repeat: i32 = @bitCast(vm.arg(3));
+    const cb = vm.arg(5);
+    if (data == 0 or len == 0) return vm.setRet(u(-1));
+    vm.setRet(u(audio.midiPlay(vm.mem.slice(data, len), data, start_ms, repeat, cb)));
+}
+fn midiPause(vm: *Vm) void {
+    if (midiCompat()) return vm.setRet(0);
+    vm.setRet(u(audio.midiPause(s(vm.arg(0)))));
+}
+fn midiResume(vm: *Vm) void {
+    if (midiCompat()) return vm.setRet(0);
+    vm.setRet(u(audio.midiResume(s(vm.arg(0)))));
+}
+fn midiGetTime(vm: *Vm) void {
+    if (midiCompat()) return vm.setRet(0);
+    // vm_midi_get_time(handle, VMUINT* current_time) -> 0/-1; time forced >= 1
+    const outp = vm.arg(1);
+    if (audio.midiGetTimeMs(s(vm.arg(0)))) |ms| {
+        if (outp != 0) vm.mem.writeU32(outp, @max(ms, 1));
+        return vm.setRet(0);
+    }
+    vm.setRet(u(-1));
+}
+fn midiStop(vm: *Vm) void {
+    if (midiCompat()) return vm.setRet(0);
+    audio.midiStop(s(vm.arg(0)));
+    vm.setRet(0);
+}
+fn midiStopAll(vm: *Vm) void {
+    if (midiCompat()) return vm.setRet(0);
+    audio.midiStopAll();
+    vm.setRet(0);
+}
+
+// -- bitstream PCM (vm_bitstream_audio_*) --
+// cfg struct (raw guest layout per MREmu's remapper): codec u8@0, is_stereo
+// u32@4, bit_per_sample u8@8, sample_freq u8@9 (enum idx into BITSTREAM_RATES).
+fn bsOpenCommon(vm: *Vm, degenerate_ok: bool) void {
+    const outp = vm.arg(0);
+    const cfgp = vm.arg(1);
+    const cb = vm.arg(2);
+    if (outp == 0 or cfgp == 0) return vm.setRet(u(-1));
+    var stereo = vm.mem.readU32(cfgp + 4) != 0;
+    var bits = vm.mem.slice(cfgp + 8, 1)[0];
+    var freq_idx = vm.mem.slice(cfgp + 9, 1)[0];
+    if (std.posix.getenv("AUDIO_LOG") != null) {
+        const raw = vm.mem.slice(cfgp, 12);
+        std.debug.print("[audio] bitstream open cfg=", .{});
+        for (raw) |b| std.debug.print("{x:0>2} ", .{b});
+        std.debug.print("\n", .{});
+    }
+    if (degenerate_ok and bits != 16) {
+        // vm_bitstream_audio_open passes a codec-level cfg MREmu zero-filled;
+        // default to something playable instead of failing like the reference.
+        bits = 16;
+        stereo = false;
+        freq_idx = 0;
+    }
+    if (bits != 16 or freq_idx >= audio.BITSTREAM_RATES.len) return vm.setRet(u(-1));
+    const h = audio.bitstreamOpenPcm(stereo, audio.BITSTREAM_RATES[freq_idx], cb);
+    if (h < 0) return vm.setRet(u(-1));
+    vm.mem.writeU32(outp, @bitCast(h));
+    vm.setRet(0); // VM_BITSTREAM_SUCCEED
+}
+fn bsOpen(vm: *Vm) void {
+    bsOpenCommon(vm, true);
+}
+fn bsOpenPcm(vm: *Vm) void {
+    bsOpenCommon(vm, false);
+}
+fn bsFinished(vm: *Vm) void {
+    vm.setRet(u(audio.bitstreamFinished(s(vm.arg(0)))));
+}
+fn bsClose(vm: *Vm) void {
+    vm.setRet(u(audio.bitstreamClose(s(vm.arg(0)))));
+}
+fn bsStatus(vm: *Vm) void {
+    // vm_bitstream_audio_get_buffer_status(handle, {total u32@0, free u32@4}*)
+    const outp = vm.arg(1);
+    const st = audio.bitstreamStatus(s(vm.arg(0))) orelse return vm.setRet(u(-1));
+    if (outp != 0) {
+        vm.mem.writeU32(outp, st.total);
+        vm.mem.writeU32(outp + 4, st.free);
+    }
+    vm.setRet(0);
+}
+fn bsPutData(vm: *Vm) void {
+    // vm_bitstream_audio_put_data(handle, buf, size, VMUINT* written)
+    const buf = vm.arg(1);
+    const size = vm.arg(2);
+    const writtenp = vm.arg(3);
+    if (buf == 0) return vm.setRet(u(-1));
+    const n = audio.bitstreamPutData(s(vm.arg(0)), vm.mem.slice(buf, size)) orelse return vm.setRet(u(-1));
+    if (writtenp != 0) vm.mem.writeU32(writtenp, n);
+    vm.setRet(0);
+}
+fn bsStart(vm: *Vm) void {
+    // vm_bitstream_audio_start(handle, {volume i32@0, start_time u32@4}*)
+    const p = vm.arg(1);
+    const vol: u8 = if (p != 0) @intCast(@min(vm.mem.readU32(p), 6)) else audio.volume;
+    const start_ms = if (p != 0) vm.mem.readU32(p + 4) else 0;
+    vm.setRet(u(audio.bitstreamStart(s(vm.arg(0)), vol, start_ms)));
+}
+fn bsStop(vm: *Vm) void {
+    vm.setRet(u(audio.bitstreamStop(s(vm.arg(0)))));
+}
+fn bsGetPlayTime(vm: *Vm) void {
+    const outp = vm.arg(1);
+    const ms = audio.bitstreamPlayTimeMs(s(vm.arg(0))) orelse return vm.setRet(u(-1));
+    if (outp != 0) vm.mem.writeU32(outp, ms);
     vm.setRet(0);
 }
 

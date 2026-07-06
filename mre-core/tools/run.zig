@@ -48,8 +48,9 @@ pub fn main() !void {
     // timer callback (the reference delivers PAINT once at launch, not per frame).
     const paint_each = std.posix.getenv("PAINT_EACH") != null;
     const tick_ms: u32 = if (std.posix.getenv("TICKMS")) |t| (std.fmt.parseInt(u32, t, 10) catch 33) else 33;
+    const ticks: u32 = if (std.posix.getenv("TICKS")) |t| (std.fmt.parseInt(u32, t, 10) catch 30) else 30;
     var i: u32 = 0;
-    while (i < 30) : (i += 1) {
+    while (i < ticks) : (i += 1) {
         vm.tick(tick_ms);
         if (paint_each) vm.deliverSysEvent(core.vm.VM_MSG_PAINT, 0);
     }
@@ -59,13 +60,22 @@ pub fn main() !void {
     if (std.posix.getenv("KEYS")) |keys| {
         var it = std.mem.splitScalar(u8, keys, ',');
         while (it.next()) |tok| {
+            if (std.mem.eql(u8, tok, "w")) { // "w" = wait ~1s between presses
+                var k: u32 = 0;
+                while (k < 30) : (k += 1) {
+                    vm.tick(tick_ms);
+                    if (paint_each) vm.deliverSysEvent(core.vm.VM_MSG_PAINT, 0);
+                }
+                continue;
+            }
             const key = parseKey(tok) orelse continue;
             std.debug.print("[keys] press {s}\n", .{tok});
             // Hold the key down across several timer ticks (the game's main loop
             // polls key state at ~75ms), then release.
             vm.deliverKey(core.vm.VM_KEY_EVENT_DOWN, @intFromEnum(key));
+            const hold: u32 = if (std.posix.getenv("HOLD")) |h| (std.fmt.parseInt(u32, h, 10) catch 6) else 6;
             var k: u32 = 0;
-            while (k < 6) : (k += 1) {
+            while (k < hold) : (k += 1) {
                 vm.tick(tick_ms);
                 if (paint_each) vm.deliverSysEvent(core.vm.VM_MSG_PAINT, 0);
             }
@@ -90,6 +100,15 @@ pub fn main() !void {
         vm.deliverPen(core.vm.VM_PEN_EVENT_RELEASE, x, y);
         k = 0;
         while (k < 6) : (k += 1) vm.tick(tick_ms);
+    }
+
+    // Optional extra run time after input (POSTTICKS=n), e.g. to let a level load.
+    if (std.posix.getenv("POSTTICKS")) |t| {
+        var extra = std.fmt.parseInt(u32, t, 10) catch 0;
+        while (extra > 0) : (extra -= 1) {
+            vm.tick(tick_ms);
+            if (paint_each) vm.deliverSysEvent(core.vm.VM_MSG_PAINT, 0);
+        }
     }
 
     // Diagnostics: where did content land? (gated)

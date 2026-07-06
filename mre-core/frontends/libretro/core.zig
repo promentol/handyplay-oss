@@ -15,6 +15,9 @@ const gpa = std.heap.c_allocator;
 /// intervals, so 30 fps × ~33 ms reproduces the real-hardware cadence.
 const FPS: f64 = 30.0;
 const FRAME_MS: u32 = @intFromFloat(@round(1000.0 / FPS));
+/// Audio frames per retro_run at the 44100 Hz rate declared in av_info.
+const AUDIO_FRAMES: usize = @intFromFloat(@as(f64, core.audio.SAMPLE_RATE) / FPS);
+var audio_buf: [AUDIO_FRAMES * 2]i16 = undefined; // interleaved stereo
 
 var env_cb: lr.EnvironmentFn = null;
 var video_cb: lr.VideoRefreshFn = null;
@@ -97,6 +100,7 @@ export fn retro_reset() callconv(.c) void {
 }
 
 fn teardown() void {
+    core.audio.reset();
     if (g_vm) |vm| {
         vm.destroy();
         g_vm = null;
@@ -128,6 +132,9 @@ export fn retro_load_game(game: ?*const lr.GameInfo) callconv(.c) bool {
     g_rom = gpa.dupe(u8, bytes) catch return false;
 
     prev_buttons = [_]bool{false} ** 12;
+    // We render audio every retro_run and feed the frontend's batch callback
+    // (the wasm player's callback is a no-op — identical path on web).
+    core.audio.rendered_by_frontend = true;
     bootRom(g_rom) catch return false;
     return true;
 }
@@ -158,6 +165,11 @@ export fn retro_run() callconv(.c) void {
     // Advance one frame (FRAME_MS = 1000/FPS; the game redraws from its timer cb).
     vm.tick(FRAME_MS);
     if (vm.used_screen_buffer and vm.gfx.layer_count == 0) vm.gfx.present();
+
+    // One frame of audio (render unconditionally so engine time advances even
+    // if the frontend never set a batch callback).
+    core.audio.render(&audio_buf, AUDIO_FRAMES);
+    if (audio_batch_cb) |acb| _ = acb(&audio_buf, AUDIO_FRAMES);
 
     // Present RGB565 framebuffer.
     if (video_cb) |refresh|

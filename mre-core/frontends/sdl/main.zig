@@ -10,6 +10,7 @@
 //!       0-9/*/# = keypad, Esc = quit.
 const std = @import("std");
 const core = @import("core");
+const audio_sink = @import("audio.zig");
 
 const c = @cImport({
     @cDefine("SDL_MAIN_HANDLED", "");
@@ -72,6 +73,10 @@ pub fn main() !void {
         return error.SdlInit;
     }
     defer c.SDL_Quit();
+
+    // Audio sink (non-fatal if no device: core falls back to silent timing).
+    audio_sink.init();
+    defer audio_sink.deinit();
 
     const w: c_int = @intCast(core.gfx.screen_w);
     const h: c_int = @intCast(core.gfx.screen_h);
@@ -140,6 +145,7 @@ pub fn main() !void {
         // itself each tick. We must NOT deliver VM_MSG_PAINT per frame — doing so
         // clobbers the timer-driven menu state and swallows input.
         vm.tick(delta);
+        audio_sink.pump();
         // Auto-release the held key after the minimum hold.
         if (held_code) |hc| {
             if (frame >= release_at) {

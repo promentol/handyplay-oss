@@ -244,8 +244,9 @@ pub const Vm = struct {
                 t.accum = 0;
                 if (t.cb != 0) {
                     if (std.posix.getenv("LOG_FILES") != null)
-                        std.debug.print("[timer] fire id={d} cb=0x{x:0>8}\n", .{ id, t.cb });
-                    _ = self.runCpu(t.cb, &.{@intCast(id)});
+                        std.debug.print("[timer] fire handle={d} cb=0x{x:0>8}\n", .{ id + 1, t.cb });
+                    // Pass the 1-based handle the callback was told at create time.
+                    _ = self.runCpu(t.cb, &.{@intCast(id + 1)});
                 }
             }
         }

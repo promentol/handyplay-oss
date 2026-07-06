@@ -122,10 +122,17 @@ pub const Bridge = struct {
         const e = self.entries[idx];
         if (self.log_all) std.debug.print("[native] {s}\n", .{e.name});
         if (e.handler) |h| {
+            // A placeholder has a handler but only returns a constant / does nothing.
+            // Log the first call so gaps surface in the logs even without the
+            // end-of-run report (e.g. the libretro core, which never exits).
+            if (e.placeholder and self.log_calls and !e.logged) {
+                std.debug.print("[bridge] STUBBED call: {s} (placeholder/constant-return — needs a real impl)\n", .{e.name});
+                self.entries[idx].logged = true;
+            }
             h(vm);
         } else {
             if (self.log_calls and !e.logged) {
-                std.debug.print("[bridge] STUB call: {s}\n", .{e.name});
+                std.debug.print("[bridge] UNIMPLEMENTED call: {s} (no handler, returned 0 — needs implementing)\n", .{e.name});
                 self.entries[idx].logged = true;
             }
             vm.setRet(0);
