@@ -12,6 +12,7 @@ const Vm = vmmod.Vm;
 const Bridge = @import("bridge.zig").Bridge;
 const gfx = @import("gfx.zig");
 const audio = @import("audio.zig");
+const tags = @import("loader/tags.zig");
 const png = @import("codecs/png.zig");
 const gif = @import("codecs/gif.zig");
 
@@ -61,7 +62,7 @@ pub const table = [_]Native{
     .{ .name = "vm_get_tick_count", .handler = getTickCount },
     .{ .name = "vm_get_exec_filename", .handler = getExecFilename },
     .{ .name = "vm_get_sys_property", .handler = getSysProperty },
-    .{ .name = "vm_get_vm_tag", .handler = retNeg1, .stub = true, .verified = false }, // UNVERIFIED — VM tag value unconfirmed
+    .{ .name = "vm_get_vm_tag", .handler = getVmTag },
     .{ .name = "vm_app_log", .handler = appLog },
     .{ .name = "vm_switch_power_saving_mode", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — no device power state; no-op is correct
     .{ .name = "vm_get_sys_scene", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: sound profile; 0 = standard mode (not silent/meeting), the sensible default
@@ -370,6 +371,28 @@ fn getExecFilename(vm: *Vm) void {
         vm.mem.writeU16(p + i * 2, 0);
     }
     vm.setRet(0);
+}
+fn getVmTag(vm: *Vm) void {
+    // vm_get_vm_tag(short* filename, int tag_num, void* buf, int* buf_size): read a
+    // tagged data section from the .vxp. Games query their own app for config/resource
+    // tags (e.g. Bubble Frenzy reads 0x27/0x28/5), so we serve tags from the loaded
+    // app bytes (vm.file) and ignore the filename. Two-call protocol: buf==0 reports
+    // the size in *buf_size; buf!=0 copies up to *buf_size bytes. Returns
+    // GET_TAG_TRUE(1) on success, GET_TAG_NOT_FOUND(0) otherwise.
+    const tag_num = vm.arg(1);
+    const buf = vm.arg(2);
+    const size_p = vm.arg(3);
+    const data = tags.findTag(vm.file, tag_num) orelse return vm.setRet(0);
+    const sz: u32 = @intCast(data.len);
+    if (buf == 0) {
+        if (size_p != 0) vm.mem.writeU32(size_p, sz);
+        return vm.setRet(1); // size query
+    }
+    const cap: u32 = if (size_p != 0) vm.mem.readU32(size_p) else sz;
+    const n = @min(cap, sz);
+    if (n != 0) @memcpy(vm.mem.slice(buf, n), data[0..n]);
+    if (size_p != 0) vm.mem.writeU32(size_p, sz);
+    vm.setRet(1);
 }
 fn appmgrList(vm: *Vm) void {
     const num = vm.arg(2);

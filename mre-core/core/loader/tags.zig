@@ -63,6 +63,24 @@ pub fn parse(file: []const u8) Error!Tags {
     return t;
 }
 
+/// Return the raw data slice for the tag with the given `id`, or null if absent.
+/// Same trailing-table walk as `parse`; used by vm_get_vm_tag to serve arbitrary
+/// tags (e.g. a game's config/resource tags 0x27/0x28) from the .vxp bytes.
+pub fn findTag(file: []const u8, id: u32) ?[]const u8 {
+    if (file.len < 12) return null;
+    var pos: u64 = rd32(file, @intCast(file.len - 12));
+    while (true) {
+        if (pos + 8 >= file.len) return null;
+        const tid = rd32(file, @intCast(pos));
+        const size = rd32(file, @intCast(pos + 4));
+        pos += 8;
+        if (pos + size >= file.len) return null;
+        if (tid == id) return file[@intCast(pos)..][0..size];
+        pos += size;
+        if (tid == 0) return null;
+    }
+}
+
 fn rd32(file: []const u8, off: u32) u32 {
     return std.mem.readInt(u32, file[off..][0..4], .little);
 }
