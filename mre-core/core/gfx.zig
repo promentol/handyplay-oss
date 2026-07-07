@@ -57,6 +57,15 @@ pub const Graphics = struct {
     screen: []u16, // host-side composite target (RGB565)
     base_buf1: u32 = 0,
     base_buf2: u32 = 0,
+    // Background snapshot for the "persistent background + per-frame sprites" render
+    // model (e.g. Funny Bubble): the game draws its background once and redraws
+    // sprites each frame WITHOUT erasing, so moving sprites leave a trail. We snapshot
+    // the composited background on the first flush after a screen's layer is created,
+    // then restore it before each subsequent frame's draws so sprites paint fresh.
+    // Full-redraw games overwrite the restored buffer completely, so it's a no-op for
+    // them. Keyed on `snap_valid`, reset when a new full-screen layer 0 is created.
+    bg_snap: []u16 = &.{},
+    snap_valid: bool = false,
     layers: [max_layers]Layer = undefined,
     layer_count: usize = 0,
     active_layer: usize = 0,
@@ -70,7 +79,9 @@ pub const Graphics = struct {
     pub fn init(gpa: std.mem.Allocator, mem: *Memory) !Graphics {
         const screen = try gpa.alloc(u16, screen_w * screen_h);
         @memset(screen, 0);
-        var g: Graphics = .{ .mem = mem, .screen = screen };
+        const snap = try gpa.alloc(u16, screen_w * screen_h);
+        @memset(snap, 0);
+        var g: Graphics = .{ .mem = mem, .screen = screen, .bg_snap = snap };
         g.base_buf1 = try g.makeBaseCanvas();
         g.base_buf2 = try g.makeBaseCanvas();
         return g;
@@ -78,6 +89,7 @@ pub const Graphics = struct {
 
     pub fn deinit(self: *Graphics, gpa: std.mem.Allocator) void {
         gpa.free(self.screen);
+        gpa.free(self.bg_snap);
     }
 
     fn makeBaseCanvas(self: *Graphics) !u32 {
@@ -148,6 +160,7 @@ pub const Graphics = struct {
             self.layers[0] = .{ .buf = self.base_buf1, .x = x, .y = y, .w = w, .h = h, .trans_color = trans };
             self.layer_count = 1;
             self.active_layer = 0;
+            self.snap_valid = false; // new screen: re-snapshot its background
             return 0;
         } else if (self.layer_count == 1) {
             if (w > screen_w or h > screen_h) return -1;
@@ -169,6 +182,19 @@ pub const Graphics = struct {
         self.layers[idx] = .{ .buf = pixels, .x = x, .y = y, .w = w, .h = h, .trans_color = trans };
         self.layer_count += 1;
         return @intCast(idx);
+    }
+
+    /// vm_graphic_delete_layer: free a layer so its slot can be reused. Our two base
+    /// buffers are assigned by index (0=base_buf1, 1=base_buf2) in a stack, so we pop
+    /// the top — the matched create/delete pair games use to switch screens round-trips
+    /// cleanly. Leaving this a no-op (the old stub) exhausted both slots after one
+    /// screen transition, so the next create_layer failed and the screen went blank.
+    pub fn deleteLayer(self: *Graphics, handle: i32) i32 {
+        if (self.layer_count == 0 or handle < 0 or handle >= self.layer_count) return -1;
+        self.layer_count -= 1;
+        if (self.active_layer >= self.layer_count)
+            self.active_layer = if (self.layer_count == 0) 0 else self.layer_count - 1;
+        return 0;
     }
 
     pub fn getLayerBuffer(self: *Graphics, handle: i32) u32 {
@@ -222,6 +248,31 @@ pub const Graphics = struct {
                 }
             }
         }
+        // Background snapshot/restore (see bg_snap field). Only for the single
+        // full-screen base layer — the persistent-background render model. Snapshot
+        // the composited layer on the first flush of a screen, restore it on each
+        // subsequent flush so the game's per-frame sprite redraws don't accumulate a
+        // trail. Skipped for multi-layer setups (they manage their own compositing).
+        if (n == 1 and self.layers[resolved[0]].buf == self.base_buf1) {
+            const px = self.base_buf1;
+            const bytes = self.mem.slice(px, screen_w * screen_h * 2);
+            const snap_bytes = std.mem.sliceAsBytes(self.bg_snap);
+            if (!self.snap_valid) {
+                // Wait for a settled full-scene frame before snapshotting the
+                // background — avoids capturing a mid-transition frame (black bg /
+                // leftover prompt). Require most of the screen to be non-black.
+                var nonblack: u32 = 0;
+                for (self.screen) |p| {
+                    if (p != 0) nonblack += 1;
+                }
+                if (nonblack > (screen_w * screen_h * 9) / 10) {
+                    @memcpy(snap_bytes, bytes);
+                    self.snap_valid = true;
+                }
+            } else {
+                @memcpy(bytes, snap_bytes);
+            }
+        }
         return 0;
     }
 
@@ -254,6 +305,10 @@ pub const Graphics = struct {
     }
 
     pub fn fillRect(self: *Graphics, buf: u32, x: i32, y: i32, w: i32, h: i32, line_color: u16, back_color: u16) void {
+        // A full-screen fill of the base layer marks a scene reset — re-snapshot the
+        // background so the bg-restore tracks the new screen (see bg_snap).
+        if (buf == self.base_buf1 and x == 0 and y == 0 and w == screen_w and h == screen_h)
+            self.snap_valid = false;
         const c = self.findCanvas(buf) orelse return;
         var st_x = @max(@as(i32, 0), x);
         var st_y = @max(@as(i32, 0), y);
@@ -372,6 +427,25 @@ pub const Graphics = struct {
         }
     }
 
+    /// vm_graphic_polygon: draw the outline of an N-point polygon (edges connected,
+    /// closed back to the first point) in `color`. Same point format as fillPolygon
+    /// (`vm_graphic_point {VMINT16 x,y}`, 4 bytes each). Honors the clip via line().
+    pub fn polygon(self: *Graphics, buf: u32, pts_emu: u32, npoints: u32, color: u16) void {
+        if (self.findCanvas(buf) == null) return;
+        const n = @min(npoints, @as(u32, max_poly_points));
+        if (n < 2) return;
+        var i: u32 = 0;
+        while (i < n) : (i += 1) {
+            const a = i;
+            const b = (i + 1) % n; // last edge closes back to point 0
+            const ax: i32 = @as(i16, @bitCast(self.mem.readU16(pts_emu + a * 4)));
+            const ay: i32 = @as(i16, @bitCast(self.mem.readU16(pts_emu + a * 4 + 2)));
+            const bx: i32 = @as(i16, @bitCast(self.mem.readU16(pts_emu + b * 4)));
+            const by: i32 = @as(i16, @bitCast(self.mem.readU16(pts_emu + b * 4 + 2)));
+            self.line(buf, ax, ay, bx, by, color);
+        }
+    }
+
     pub fn line(self: *Graphics, buf: u32, x0: i32, y0: i32, x1: i32, y1: i32, color: u16) void {
         const c = self.findCanvas(buf) orelse return;
         // Bresenham, clipped per-pixel.
@@ -399,8 +473,16 @@ pub const Graphics = struct {
     }
 
     pub fn blt(self: *Graphics, dst_buf: u32, x_dest: i32, y_dest: i32, src_buf: u32, x_src: i32, y_src: i32, width: i32, height: i32) void {
+        self.bltAlpha(dst_buf, x_dest, y_dest, src_buf, x_src, y_src, width, height, 255);
+    }
+
+    /// vm_graphic_blt_ex: blt with a per-blt alpha [0,255] (0 = fully transparent,
+    /// 255 = fully opaque). Each opaque src pixel is merged with the destination as
+    /// out = src*a + dst*(255-a). alpha == 255 is the plain-blt fast path.
+    pub fn bltAlpha(self: *Graphics, dst_buf: u32, x_dest: i32, y_dest: i32, src_buf: u32, x_src: i32, y_src: i32, width: i32, height: i32, alpha: u8) void {
         const dst = self.findCanvas(dst_buf) orelse return;
         const src = self.findCanvas(src_buf) orelse return;
+        if (alpha == 0) return; // fully transparent: nothing to draw
         var w = width;
         var h = height;
         if (x_src + w > src.w) w = src.w - x_src;
@@ -426,7 +508,12 @@ pub const Graphics = struct {
                 const color = self.mem.readU16(src.pixels + @as(u32, @intCast(im_y * src.w + im_x)) * 2);
                 if (src.flag and color == src.trans_color) continue; // transparent
                 const dst_off = dst.pixels + @as(u32, @intCast(sy * dst.w + sx)) * 2;
-                const out = if (self.blend_enabled) blend565(color, self.mem.readU16(dst_off)) else color;
+                const out = if (alpha != 255)
+                    blendAlpha565(color, self.mem.readU16(dst_off), alpha)
+                else if (self.blend_enabled)
+                    blend565(color, self.mem.readU16(dst_off))
+                else
+                    color;
                 self.mem.writeU16(dst_off, out);
             }
         }
@@ -441,6 +528,23 @@ pub const Graphics = struct {
         const bg = (b >> 5) & 0x3F;
         const bb = b & 0x1F;
         return ((ar + br) >> 1) << 11 | ((ag + bg) >> 1) << 5 | ((ab + bb) >> 1);
+    }
+
+    /// Weighted blend of src `s` over dst `d` by `alpha` [1,254], per RGB565 channel:
+    /// out = (s*alpha + d*(255-alpha)) / 255.
+    fn blendAlpha565(s: u16, d: u16, alpha: u8) u16 {
+        const a: u32 = alpha;
+        const ia: u32 = 255 - a;
+        const sr = (s >> 11) & 0x1F;
+        const sg = (s >> 5) & 0x3F;
+        const sb = s & 0x1F;
+        const dr = (d >> 11) & 0x1F;
+        const dg = (d >> 5) & 0x3F;
+        const db = d & 0x1F;
+        const or_: u16 = @intCast((sr * a + dr * ia) / 255);
+        const og: u16 = @intCast((sg * a + dg * ia) / 255);
+        const ob: u16 = @intCast((sb * a + db * ia) / 255);
+        return (or_ << 11) | (og << 5) | ob;
     }
 
     /// vm_graphic_set_alpha_blending_layer: enable 50% blend for subsequent blts

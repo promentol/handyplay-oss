@@ -75,6 +75,28 @@ pub fn decode(gpa: std.mem.Allocator, buf: []const u8) Error!Image {
             defer gpa.free(indices);
             lzw(min_code, data.items, indices);
 
+            // De-interlace: an interlaced GIF stores rows in 4 passes (starts
+            // 0,4,2,1 with steps 8,8,4,2). LZW yields them in that pass order, so
+            // remap to sequential rows — otherwise the image renders as a repeated
+            // vertical smear.
+            if (packed_id & 0x40 != 0 and fh > 0 and fw > 0) {
+                const tmp = try gpa.alloc(u8, @as(usize, fw) * fh);
+                defer gpa.free(tmp);
+                @memcpy(tmp, indices);
+                const passes = [_][2]u32{ .{ 0, 8 }, .{ 4, 8 }, .{ 2, 4 }, .{ 1, 2 } };
+                var decoded_row: u32 = 0;
+                for (passes) |ps| {
+                    var ay: u32 = ps[0];
+                    while (ay < fh) : (ay += ps[1]) {
+                        @memcpy(
+                            indices[@as(usize, ay) * fw ..][0..fw],
+                            tmp[@as(usize, decoded_row) * fw ..][0..fw],
+                        );
+                        decoded_row += 1;
+                    }
+                }
+            }
+
             // Compose into logical-screen-sized RGBA (transparent outside frame).
             const rgba = try gpa.alloc(u8, @as(usize, scr_w) * scr_h * 4);
             errdefer gpa.free(rgba);

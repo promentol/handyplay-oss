@@ -131,7 +131,7 @@ pub const table = [_]Native{
     .{ .name = "vm_graphic_get_screen_width", .handler = gScreenW },
     .{ .name = "vm_graphic_get_screen_height", .handler = gScreenH },
     .{ .name = "vm_graphic_create_layer", .handler = gCreateLayer },
-    .{ .name = "vm_graphic_delete_layer", .handler = retZero, .stub = true, .verified = false }, // UNVERIFIED — layer not actually freed/deregistered
+    .{ .name = "vm_graphic_delete_layer", .handler = gDeleteLayer },
     .{ .name = "vm_graphic_active_layer", .handler = gActiveLayer },
     .{ .name = "vm_graphic_get_layer_buffer", .handler = gGetLayerBuffer },
     .{ .name = "vm_graphic_flush_layer", .handler = gFlushLayer },
@@ -171,10 +171,12 @@ pub const table = [_]Native{
     .{ .name = "vm_graphic_rect", .handler = gRect },
     .{ .name = "vm_graphic_rect_ex", .handler = gRectEx },
     .{ .name = "vm_graphic_fill_polygon", .handler = gFillPolygon },
+    .{ .name = "vm_graphic_polygon", .handler = gPolygon },
     .{ .name = "vm_graphic_fill_ellipse_ex", .handler = gFillEllipseEx },
     .{ .name = "vm_graphic_set_clip", .handler = gSetClip },
     .{ .name = "vm_graphic_reset_clip", .handler = gResetClip },
     .{ .name = "vm_graphic_flush_screen", .handler = gFlushScreen },
+    .{ .name = "vm_graphic_flush_buffer", .handler = gFlushScreen }, // present the back-buffer (same as flush_screen for the direct-buffer model)
     .{ .name = "vm_graphic_is_r2l_state", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: 0 = not right-to-left; correct for LTR games
     .{ .name = "vm_graphic_setcolor", .handler = gSetColor },
     .{ .name = "vm_graphic_canvas_set_trans_color", .handler = gCanvasTrans },
@@ -202,7 +204,7 @@ pub const table = [_]Native{
     .{ .name = "vm_load_resource", .handler = loadResource },
     .{ .name = "vm_resource_get_data", .handler = resourceGetData },
     .{ .name = "vm_get_res_header", .handler = retEight, .stub = true, .verified = false }, // UNVERIFIED — returns constant 8 (header size guessed)
-    .{ .name = "vm_reg_res_provider", .handler = retZero, .stub = true, .verified = true }, // VERIFIED — doc: void; registers a guest resource callback consulted only by resid-based loaders (vm_midi_play etc.), which are themselves stubbed, so storing it is a no-op today
+    .{ .name = "vm_reg_res_provider", .handler = regResProvider }, // stores the guest fp(resid, VMINT* len)->VMUINT8* consulted by vm_midi_play
 
     // ---- CharSet ----
     .{ .name = "vm_ucs2_to_gb2312", .handler = ucs2ToAscii },
@@ -234,7 +236,7 @@ pub const table = [_]Native{
     .{ .name = "vm_audio_suspend_bg_play", .handler = audioSuspendBg }, // [reconstructed]
     .{ .name = "vm_audio_resume_bg_play", .handler = audioResumeBg }, // [reconstructed]
     // legacy MIDI/bitstream APIs (route to the same backend where sensible)
-    .{ .name = "vm_midi_play", .handler = retNeg1, .stub = true, .verified = true }, // VERIFIED — doc: plays MIDI by resource id via the reg_res_provider callback; resid→bytes + guest-callback invocation not wired, so report VM_MIDI_FAILED (-1)
+    .{ .name = "vm_midi_play", .handler = midiPlay }, // plays MIDI by resource id, resolved via the reg_res_provider callback
     .{ .name = "vm_midi_play_by_bytes", .handler = midiPlayBytes },
     .{ .name = "vm_midi_play_by_bytes_ex", .handler = midiPlayBytesEx },
     .{ .name = "vm_midi_pause", .handler = midiPause },
@@ -342,6 +344,24 @@ fn getTickCount(vm: *Vm) void {
     vm.setRet(vm.clock_ms);
 }
 fn getTime(vm: *Vm) void {
+    // vm_get_time(vm_time_t* out) fills {year,mon,day,hour,min,sec} (VMUINT each) and
+    // returns 0. Games seed their RNG from these fields (e.g. Funny Bubble uses
+    // sec + min*60 + hour*3600), so leaving the struct unwritten gave a constant seed
+    // (always the same "random" — e.g. always a blue ball). Write real host time.
+    const p = vm.arg(0);
+    if (p != 0) {
+        const secs: u64 = @intCast(@max(@as(i64, 0), std.time.timestamp()));
+        const es = std.time.epoch.EpochSeconds{ .secs = secs };
+        const yd = es.getEpochDay().calculateYearDay();
+        const md = yd.calculateMonthDay();
+        const ds = es.getDaySeconds();
+        vm.mem.writeU32(p + 0, yd.year);
+        vm.mem.writeU32(p + 4, md.month.numeric());
+        vm.mem.writeU32(p + 8, @as(u32, md.day_index) + 1);
+        vm.mem.writeU32(p + 12, ds.getHoursIntoDay());
+        vm.mem.writeU32(p + 16, ds.getMinutesIntoHour());
+        vm.mem.writeU32(p + 20, ds.getSecondsIntoMinute());
+    }
     vm.setRet(0);
 }
 fn getCurrUtc(vm: *Vm) void {
@@ -616,7 +636,12 @@ fn diskFree(vm: *Vm) void {
     vm.setRet(256 * 1024 * 1024);
 }
 fn resOffsetFromFile(vm: *Vm) void {
-    if (vm.app) |app| vm.setRet(app.res_offset) else vm.setRet(0);
+    // vm_get_resource_offset_from_file(VMWSTR filename, char* res_name): return the
+    // file offset of the named resource (arg1, ASCII, no path). 0 = not found.
+    // Ignoring res_name and returning app.res_offset gave a wrong base -> the game
+    // read a garbage resource table (huge/negative offsets -> OOB read crash).
+    const res_name = vm.readCStr(vm.arg(1));
+    if (vm.resources.find(res_name)) |res| vm.setRet(res.offset) else vm.setRet(0);
 }
 
 // ---- SIM -------------------------------------------------------------------
@@ -660,6 +685,9 @@ fn gCreateLayer(vm: *Vm) void {
 }
 fn gActiveLayer(vm: *Vm) void {
     vm.setRet(u(vm.gfx.activeLayer(s(vm.arg(0)))));
+}
+fn gDeleteLayer(vm: *Vm) void {
+    vm.setRet(u(vm.gfx.deleteLayer(s(vm.arg(0)))));
 }
 fn gGetLayerBuffer(vm: *Vm) void {
     vm.setRet(vm.gfx.getLayerBuffer(s(vm.arg(0))));
@@ -712,6 +740,13 @@ fn gFillPolygon(vm: *Vm) void {
         vm.gfx.fillPolygon(buf, vm.arg(1), vm.arg(2), vm.gfx.global_color);
     vm.setRet(0);
 }
+fn gPolygon(vm: *Vm) void {
+    // vm_graphic_polygon(handle, point*, npoint): draw the polygon outline in the
+    // global pen color. arg0 = layer handle (-1 = active layer).
+    if (vm.gfx.activeBuf(s(vm.arg(0)))) |buf|
+        vm.gfx.polygon(buf, vm.arg(1), vm.arg(2), vm.gfx.global_color);
+    vm.setRet(0);
+}
 fn gSetAlphaBlend(vm: *Vm) void {
     // vm_graphic_set_alpha_blending_layer(handle): handle>=0 enables 50% blend for
     // subsequent blts; -1 disables. Games bracket a draw with enable/…/disable.
@@ -756,7 +791,11 @@ fn gBlt(vm: *Vm) void {
     vm.setRet(0);
 }
 fn gBltEx(vm: *Vm) void {
-    vm.gfx.blt(vm.arg(0), s(vm.arg(1)), s(vm.arg(2)), vm.arg(3), s(vm.arg(4)), s(vm.arg(5)), s(vm.arg(6)), s(vm.arg(7)));
+    // vm_graphic_blt_ex(dst, x, y, src, x_src, y_src, w, h, frame_index, alpha)
+    // arg8 = frame_index (unused: our src canvases are single-frame, matching the
+    // plain-blt path), arg9 = alpha [0,255] merged with the destination.
+    const alpha: u8 = @truncate(vm.arg(9));
+    vm.gfx.bltAlpha(vm.arg(0), s(vm.arg(1)), s(vm.arg(2)), vm.arg(3), s(vm.arg(4)), s(vm.arg(5)), s(vm.arg(6)), s(vm.arg(7)), alpha);
     vm.setRet(0);
 }
 fn gRotate(vm: *Vm) void {
@@ -1019,6 +1058,12 @@ fn gCharNumInWidth(vm: *Vm) void {
 }
 
 // ---- resources -------------------------------------------------------------
+fn regResProvider(vm: *Vm) void {
+    // vm_reg_res_provider(VMUINT8* (*fp)(VMINT resid, VMINT* len)): store the app's
+    // own resource getter; vm_midi_play consults it to resolve a resid to bytes.
+    vm.res_provider = vm.arg(0);
+    vm.setRet(0);
+}
 fn loadResource(vm: *Vm) void {
     const name = vm.readCStr(vm.arg(0));
     const size_ptr = vm.arg(1);
@@ -1336,6 +1381,29 @@ fn logClip(clip: []const u8, tag: u8) void {
     std.debug.print("[audio] midi tag=0x{x:0>2} len={d} magic=", .{ tag, clip.len });
     for (clip[0..@min(clip.len, 12)]) |b| std.debug.print("{x:0>2} ", .{b});
     std.debug.print("\n", .{});
+}
+fn midiPlay(vm: *Vm) void {
+    if (midiCompat()) return vm.setRet(1);
+    // vm_midi_play(resid, repeat, void(*f)(handle, event)) -> handle. The MIDI bytes
+    // live in the app's own resource array; resolve resid -> {ptr,len} by invoking the
+    // provider the game registered with vm_reg_res_provider:
+    //   VMUINT8* fp(VMINT resid, VMINT* len)
+    // The provider is a short array-index lookup. It runs as a nested emu_start
+    // (natives already run inside the app's main run_cpu), so use runCpuNested,
+    // which snapshots/restores CPU context — otherwise the outer caller's LR/CPSR
+    // are clobbered and the game's main loop freezes on return.
+    const resid = vm.arg(0);
+    const repeat: i32 = @bitCast(vm.arg(1));
+    const cb = vm.arg(2);
+    if (vm.res_provider == 0) return vm.setRet(u(-1));
+    const len_ptr = vm.scratch;
+    vm.mem.writeU32(len_ptr, 0);
+    const data = vm.runCpuNested(vm.res_provider, &.{ resid, len_ptr });
+    const len = vm.mem.readU32(len_ptr);
+    if (data == 0 or len == 0) return vm.setRet(u(-1));
+    const clip = vm.mem.slice(data, len);
+    logClip(clip, 0xFE);
+    vm.setRet(u(audio.midiPlay(clip, data, 0, repeat, cb)));
 }
 fn midiPlayBytes(vm: *Vm) void {
     if (midiCompat()) return vm.setRet(1);

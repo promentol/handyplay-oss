@@ -36,7 +36,10 @@ pub const VFile = struct {
 
     pub fn read(self: *VFile, buf: []u8) usize {
         if (self.file) |f| return f.read(buf) catch 0;
-        const remaining = if (self.pos < self.data.len) self.data.len - self.pos else 0;
+        // Guard the slice: a pos past EOF (games seek to bogus offsets) makes
+        // `self.data[pos..]` panic on the start index even for a 0-length read.
+        if (self.pos >= self.data.len) return 0;
+        const remaining = self.data.len - self.pos;
         const n = @min(buf.len, remaining);
         @memcpy(buf[0..n], self.data[@intCast(self.pos)..][0..n]);
         self.pos += n;
@@ -123,6 +126,7 @@ pub const Vm = struct {
     cb_keyboard: u32 = 0,
     cb_pen: u32 = 0,
     cb_msg_proc: u32 = 0,
+    res_provider: u32 = 0, // vm_reg_res_provider: guest fp(resid, VMINT* len) -> VMUINT8*
     used_screen_buffer: bool = false,
     quit_requested: bool = false, // set by vm_exit_app; frontends should stop
 
@@ -131,6 +135,7 @@ pub const Vm = struct {
     timers: [max_timers]Timer = [_]Timer{.{}} ** max_timers,
     rng: u32 = 1,
     clock_ms: u32 = 0, // deterministic tick-count, advanced by tick(delta)
+    timer_fires: u32 = 0, // debug: count of timer callbacks fired (pacing diagnostic)
     scratch: u32 = 0, // 512-byte shared scratch (e.g. vm_ucs2_string result)
     trace_writes: bool = false, // debug: log guest mem writes during key handler
     watch_addr: u32 = 0, // debug: log all reads/writes of this guest address + PC
@@ -242,6 +247,7 @@ pub const Vm = struct {
             t.accum += delta_ms;
             if (t.accum >= t.interval) {
                 t.accum = 0;
+                self.timer_fires +%= 1;
                 if (t.cb != 0) {
                     if (std.posix.getenv("LOG_FILES") != null)
                         std.debug.print("[timer] fire handle={d} cb=0x{x:0>8}\n", .{ id + 1, t.cb });
@@ -315,6 +321,19 @@ pub const Vm = struct {
             self.dumpRegs();
         }
         return self.cpu.readReg(c.UC_ARM_REG_R0);
+    }
+
+    /// Invoke a guest callback from *inside* a native (nested emu_start). Snapshots
+    /// the full CPU context first and restores it after, so the outer run's LR/CPSR/
+    /// registers survive — otherwise runCpu's LR=idle_p clobbers the caller and the
+    /// game's main loop terminates on return. Returns the callback's r0.
+    pub fn runCpuNested(self: *Vm, adr: u32, args: []const u32) u32 {
+        const ctx = self.cpu.contextAlloc() orelse return 0;
+        defer Cpu.contextFree(ctx);
+        self.cpu.contextSave(ctx);
+        const r = self.runCpu(adr, args);
+        self.cpu.contextRestore(ctx);
+        return r;
     }
 
     /// ADS bootstrap. `data_base` = offset_mem + mem_size + 0x100.

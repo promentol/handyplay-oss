@@ -99,8 +99,22 @@ pub fn main() !void {
     };
     defer c.SDL_DestroyTexture(tex);
 
+    // Frame-rate cap. Games drive their loop from a timer (e.g. Dragon Fire asks for
+    // 10ms = 100fps), but real MediaTek phones couldn't sustain that and ran these
+    // 240x320 titles at ~20-30fps; movement is a fixed step per timer fire, so it was
+    // tuned to that slow rate. Uncapped we'd fire once per host frame (~60fps) and the
+    // game feels ~2x too fast. Capping the frame time throttles the game-step rate to
+    // match device feel. Override with MRE_FPS (0 = uncapped).
+    const target_fps: u32 = blk: {
+        if (c.SDL_getenv("MRE_FPS")) |s| break :blk std.fmt.parseInt(u32, std.mem.span(s), 10) catch 30;
+        break :blk 30;
+    };
+    const frame_ms: u32 = if (target_fps == 0) 0 else 1000 / target_fps;
     var last: u64 = c.SDL_GetTicks();
     var frame: u64 = 0;
+    var pace_t0: u64 = last;
+    var pace_f0: u64 = 0;
+    var pace_fires0: u32 = 0;
     // Synthesize a minimum key-hold: deliver DOWN immediately, then auto-release a
     // few frames later (regardless of physical release). The game polls key state at
     // ~75ms, so a too-fast tap would set+clear the flag between timer fires and be
@@ -154,6 +168,20 @@ pub fn main() !void {
             }
         }
         frame += 1;
+        // Pacing diagnostic: once per real second, report host FPS and game-step
+        // (timer-fire) rate. Set MRE_PACE_LOG=1.
+        if (c.SDL_getenv("MRE_PACE_LOG") != null) {
+            if (now - pace_t0 >= 1000) {
+                var active_timers: u32 = 0;
+                for (vm.timers) |t| {
+                    if (t.active) active_timers += 1;
+                }
+                std.debug.print("[pace] fps={d} timer_fires/s={d} active_timers={d} delta={d}ms\n", .{ frame - pace_f0, vm.timer_fires - pace_fires0, active_timers, delta });
+                pace_t0 = now;
+                pace_f0 = frame;
+                pace_fires0 = vm.timer_fires;
+            }
+        }
         // Direct back-buffer only when the game isn't using the layer model.
         if (vm.used_screen_buffer and vm.gfx.layer_count == 0) vm.gfx.present();
 
@@ -162,7 +190,13 @@ pub fn main() !void {
         _ = c.SDL_RenderClear(renderer);
         _ = c.SDL_RenderTexture(renderer, tex, null, null);
         _ = c.SDL_RenderPresent(renderer);
-        c.SDL_Delay(16);
+        // Frame limiter: sleep the remainder of the target frame so the game-step
+        // rate (one timer fire per frame) matches real-device pacing. `now` was
+        // sampled at the top of this iteration.
+        if (frame_ms != 0) {
+            const work: u64 = c.SDL_GetTicks() - now;
+            if (work < frame_ms) c.SDL_Delay(@intCast(frame_ms - work));
+        }
     }
 
     // Dump the final on-screen frame so its state can be inspected after exit.

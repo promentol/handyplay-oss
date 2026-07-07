@@ -94,6 +94,25 @@ pub const Cpu = struct {
         _ = c.uc_emu_stop(self.uc);
     }
 
+    /// Full register-state snapshot, for save/restore around a *nested* emuStart
+    /// (a guest callback invoked from inside a native, which itself runs inside an
+    /// outer emuStart). Without this the nested run clobbers the outer LR/CPSR.
+    pub const Context = ?*c.uc_context;
+    pub fn contextAlloc(self: *Cpu) Context {
+        var ctx: ?*c.uc_context = null;
+        if (c.uc_context_alloc(self.uc, &ctx) != c.UC_ERR_OK) return null;
+        return ctx;
+    }
+    pub fn contextSave(self: *Cpu, ctx: Context) void {
+        _ = c.uc_context_save(self.uc, ctx);
+    }
+    pub fn contextRestore(self: *Cpu, ctx: Context) void {
+        _ = c.uc_context_restore(self.uc, ctx);
+    }
+    pub fn contextFree(ctx: Context) void {
+        _ = c.uc_context_free(ctx);
+    }
+
     pub fn addMemWriteHook(
         self: *Cpu,
         cb: *const fn (?*c.uc_engine, c.uc_mem_type, u64, c_int, i64, ?*anyopaque) callconv(.c) void,
